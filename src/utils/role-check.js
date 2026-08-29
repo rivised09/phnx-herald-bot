@@ -1,15 +1,16 @@
 const { CONFIG } = require('../config');
 
-function hasRole(member, roleId) {
-  if (!member || !member.roles) return false;
+function hasAnyRole(member, roleIds) {
+  if (!member || !roleIds || roleIds.length === 0) return false;
   if (member.roles.cache) {
-    return member.roles.cache.has(roleId);
+    return roleIds.some((id) => member.roles.cache.has(id));
   }
-  return (member.roles || []).includes(roleId);
+  const rolesList = member.roles || [];
+  return roleIds.some((id) => rolesList.includes(id));
 }
 
 function hasLeadershipRole(member) {
-  return hasRole(member, CONFIG.ROLES.LEADERSHIP);
+  return hasAnyRole(member, CONFIG.ROLES.LEADERSHIP);
 }
 
 function isLeadershipUser(interaction) {
@@ -19,4 +20,4 @@ function isLeadershipUser(interaction) {
   return hasLeadershipRole(member);
 }
 
-module.exports = { hasRole, hasLeadershipRole, isLeadershipUser };
+module.exports = { hasAnyRole, hasLeadershipRole, isLeadershipUser, hasRole: hasAnyRole };

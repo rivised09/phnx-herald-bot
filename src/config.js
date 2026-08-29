@@ -16,6 +16,13 @@ function validateEnv() {
   }
 }
 
+function parseRoleIds(value) {
+  return (value || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
 const CONFIG = {
   DISCORD: {
     TOKEN: process.env.DISCORD_TOKEN,
@@ -27,7 +34,7 @@ const CONFIG = {
     REMINDERS: process.env.REMINDERS_CHANNEL_ID || null,
   },
   ROLES: {
-    LEADERSHIP: process.env.LEADERSHIP_ROLE_ID,
+    LEADERSHIP: parseRoleIds(process.env.LEADERSHIP_ROLE_ID),
   },
   DB: {
     DATABASE_URL: process.env.DATABASE_URL,
