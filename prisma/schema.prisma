@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Event {
+  id               String   @id @default(uuid())
+  guildId          String   @map("guild_id") @db.VarChar(40)
+  title            String
+  description      String?
+  startTime        DateTime @map("start_time")
+  endTime          DateTime @map("end_time")
+  location         String?
+  entityType       String   @default("EXTERNAL") @map("entity_type")
+  channelId        String?  @map("channel_id")
+  status           String   @default("SCHEDULED") @db.VarChar(20)
+
+  discordMessageId String?  @map("discord_message_id") @db.VarChar(40)
+  discordEventId   String?  @map("discord_event_id") @db.VarChar(40)
+
+  pingOneHour      Boolean  @default(false) @map("ping_one_hour")
+  pingThirtyMin    Boolean  @default(false) @map("ping_thirty_min")
+  pingTenMin       Boolean  @default(false) @map("ping_ten_min")
+  pingStarted      Boolean  @default(false) @map("ping_started")
+
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("events")
+
+  @@index([status])
+  @@index([startTime])
+  @@index([guildId])
+}
+
+model DiscordChannel {
+  id        String   @id @db.VarChar(40)
+  guildId   String   @map("guild_id") @db.VarChar(40)
+  name      String
+  type      String   @db.VarChar(20)
+  position  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("discord_channels")
+
+  @@index([guildId])
+  @@index([type])
+}

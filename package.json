@@ -1,0 +1,28 @@
+{
+  "name": "phoenix-herald-bot",
+  "version": "1.0.0",
+  "description": "Phoenix Herald - Discord event bot and API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "deploy:commands": "node src/bot/deploy-commands.js",
+    "migrate": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^6.7.0",
+    "cors": "^2.8.5",
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "prisma": "^6.7.0"
+  }
+}
