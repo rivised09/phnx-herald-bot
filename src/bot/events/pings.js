@@ -65,7 +65,7 @@ async function completeEndedEvents(client) {
   const ended = await prisma.event.findMany({
     where: {
       status: { in: ['SCHEDULED', 'ACTIVE'] },
-      OR: [{ endTime: { lt: now } }, { AND: [{ endTime: null }, { startTime: { lt: now } }] }],
+      endTime: { lt: now },
     },
   });
 
