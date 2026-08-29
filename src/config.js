@@ -42,6 +42,7 @@ const CONFIG = {
   },
   APP: {
     CLIENT_URL: process.env.CLIENT_URL || 'http://localhost:3000',
+    DASHBOARD_ACCESS_CODE: process.env.DASHBOARD_ACCESS_CODE || null,
     PORT: process.env.PORT || 3001,
   },
   BRANDING: {
@@ -65,4 +66,11 @@ const CONFIG = {
   },
 };
 
-module.exports = { CONFIG, validateEnv };
+function dashboardUrl() {
+  const base = CONFIG.APP.CLIENT_URL;
+  const code = CONFIG.APP.DASHBOARD_ACCESS_CODE;
+  if (!code) return `${base}/dashboard`;
+  return `${base}/dashboard?code=${encodeURIComponent(code)}`;
+}
+
+module.exports = { CONFIG, validateEnv, dashboardUrl };

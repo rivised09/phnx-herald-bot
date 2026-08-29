@@ -8,7 +8,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const prisma = require('../../db');
-const { CONFIG } = require('../../config');
+const { CONFIG, dashboardUrl } = require('../../config');
 const { buildEventListEmbed, isUpcoming, sortByStart } = require('../commands/helpers');
 const { isLeadershipUser } = require('../../utils/role-check');
 const { formatUtcDateTime, formatUtcInput, parseUtcInput } = require('../../utils/time');
@@ -115,7 +115,7 @@ async function handleDashboardOpen(interaction) {
   const link = new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
     .setLabel('📋 Open Dashboard')
-    .setURL(CONFIG.APP.CLIENT_URL);
+    .setURL(dashboardUrl());
 
   const row = new ActionRowBuilder().addComponents(link);
   await interaction.reply({
