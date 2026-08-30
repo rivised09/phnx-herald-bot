@@ -77,10 +77,14 @@ async function sendPing(client, event, windowLabel) {
   const channel = (await getRemindersChannel(client)) || (await getEventsChannel(client));
   if (!channel) return null;
   const embed = buildEventEmbed(event);
-  const content =
-    windowLabel === 'starting' || windowLabel === 'started'
-      ? `@everyone 🔔 **${event.title}** is starting now!`
-      : `@everyone 🔔 **${event.title}** starts in **${windowLabel}**!`;
+  let content;
+  if (windowLabel === 'starting' || windowLabel === 'started') {
+    content = `@everyone 🔔 **${event.title}** is starting now!`;
+  } else if (windowLabel === '7 hours') {
+    content = `@everyone 🔔 Don't forget we have **${event.title}** later!`;
+  } else {
+    content = `@everyone 🔔 **${event.title}** starts in **${windowLabel}**!`;
+  }
   const message = await channel.send({ content, embeds: [embed] });
   return message;
 }

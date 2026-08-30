@@ -26,6 +26,7 @@ model Event {
   pingOneHour      Boolean  @default(false) @map("ping_one_hour")
   pingThirtyMin    Boolean  @default(false) @map("ping_thirty_min")
   pingTenMin       Boolean  @default(false) @map("ping_ten_min")
+  pingSevenHours   Boolean  @default(false) @map("ping_seven_hours")
   pingStarted      Boolean  @default(false) @map("ping_started")
 
   createdAt        DateTime @default(now()) @map("created_at")

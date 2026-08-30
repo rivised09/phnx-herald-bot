@@ -50,6 +50,7 @@ const CONFIG = {
   },
   BEHAVIOR: {
     PING_WINDOWS: [
+      { label: '7 hours', key: 'pingSevenHours', msBefore: 7 * 60 * 60 * 1000 },
       { label: 'one hour', key: 'pingOneHour', msBefore: 60 * 60 * 1000 },
       { label: '30 minutes', key: 'pingThirtyMin', msBefore: 30 * 60 * 1000 },
       { label: '10 minutes', key: 'pingTenMin', msBefore: 10 * 60 * 1000 },
