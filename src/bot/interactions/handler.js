@@ -2,6 +2,7 @@ const { Events } = require('discord.js');
 const { phnxMenu } = require('../commands/phnx-menu');
 const { todayCommand } = require('../commands/today');
 const { upcomingCommand } = require('../commands/upcoming');
+const { pingReset } = require('../commands/ping-reset');
 const { handleButtonInteraction, handleModalSubmit } = require('./buttons');
 
 const EPHEMERAL_FLAG = 64;
@@ -19,6 +20,9 @@ function onInteractionCreate(client) {
             break;
           case 'phnx-upcoming':
             await upcomingCommand(interaction);
+            break;
+          case 'phnx-ping-reset':
+            await pingReset(interaction);
             break;
           default:
             await interaction.reply({

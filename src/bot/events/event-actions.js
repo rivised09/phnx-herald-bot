@@ -3,7 +3,31 @@ const { CONFIG } = require('../../config');
 const { updateEventMessage, deleteEventMessage, sendNotification } = require('./posting');
 const { cancelScheduledEvent, deleteScheduledEvent, mapEntityType } = require('./scheduled');
 
-async function syncEventUpdate(client, updated, { notifyModified = true } = {}) {
+async function rearmPingWindows(eventId, startTime) {
+  const remainingMs = startTime.getTime() - Date.now();
+  const data = {};
+  for (const windowInfo of CONFIG.BEHAVIOR.PING_WINDOWS) {
+    if (remainingMs > windowInfo.msBefore) {
+      data[windowInfo.key] = false;
+    }
+  }
+  if (Object.keys(data).length === 0) return;
+  await prisma.event.update({ where: { id: eventId }, data });
+}
+
+async function syncEventUpdate(client, updated, { notifyModified = true, previousStartTime = null } = {}) {
+  if (
+    previousStartTime &&
+    updated.startTime &&
+    previousStartTime.getTime() !== updated.startTime.getTime()
+  ) {
+    try {
+      await rearmPingWindows(updated.id, updated.startTime);
+    } catch (err) {
+      console.error('[EVENT-ACTIONS] Failed to rearm ping windows:', err.message);
+    }
+  }
+
   try {
     await updateEventMessage(client, updated);
   } catch (err) {

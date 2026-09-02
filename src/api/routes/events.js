@@ -193,7 +193,7 @@ function createEventsRouter(context) {
 
     try {
       const client = await waitForClient(context);
-      await syncEventUpdate(client, updated);
+      await syncEventUpdate(client, updated, { previousStartTime: existing.startTime });
     } catch (err) {
       console.error('[API] Failed to sync event update:', err.message);
     }

@@ -13,6 +13,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('phnx-upcoming')
     .setDescription('⏰ Show the nearest upcoming event'),
+
+  new SlashCommandBuilder()
+    .setName('phnx-ping-reset')
+    .setDescription('🔁 Re-arm reminder pings for upcoming events (leadership only)'),
 ];
 
 async function registerCommands() {

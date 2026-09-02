@@ -404,7 +404,7 @@ async function handleModalSubmit(interaction) {
         endTime,
       },
     });
-    await syncEventUpdate(interaction.client, updated);
+    await syncEventUpdate(interaction.client, updated, { previousStartTime: event.startTime });
     await interaction.editReply(`✅ **"${updated.title}"** has been updated!`);
   } catch (err) {
     console.error('[MODAL] Edit failed:', err.message);

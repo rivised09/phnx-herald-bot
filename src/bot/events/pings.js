@@ -4,9 +4,6 @@ const { CONFIG } = require('../../config');
 const { msUntil } = require('../../utils/time');
 const { sendPing, updateEventMessage } = require('./posting');
 
-const STARTING_PING_THRESHOLD_MS = 0;
-const MAX_START_PING_DELAY_MS = 5 * 60 * 1000;
-
 async function checkEventPings(client) {
   const now = Date.now();
   const horizon = new Date(now - 24 * 60 * 60 * 1000);
@@ -28,32 +25,20 @@ async function checkEventPings(client) {
       try {
         const windowLabel = windowInfo.label;
         await sendPing(client, event, windowLabel);
-        await prisma.event.update({
+        const data = { [windowInfo.key]: true };
+        if (windowInfo.key === 'pingStarted' && event.status === 'SCHEDULED') {
+          data.status = 'ACTIVE';
+        }
+        const updated = await prisma.event.update({
           where: { id: event.id },
-          data: { [windowInfo.key]: true },
+          data,
         });
-        await updateEventMessage(client, event, {
-          pingNote: `Starts in ${windowLabel}`,
+        await updateEventMessage(client, updated, {
+          pingNote: windowInfo.key === 'pingStarted' ? null : `Starts in ${windowLabel}`,
         });
         console.log(`[PINGS] Sent "${windowLabel}" ping for event "${event.title}"`);
       } catch (err) {
         console.error(`[PINGS] Failed to send "${windowInfo.label}" ping for "${event.title}":`, err.message);
-      }
-    }
-
-    if (!event.pingStarted && remainingMs <= STARTING_PING_THRESHOLD_MS) {
-      if (remainingMs >= -MAX_START_PING_DELAY_MS) {
-        try {
-          await sendPing(client, event, 'starting');
-          const updated = await prisma.event.update({
-            where: { id: event.id },
-            data: { pingStarted: true, status: 'ACTIVE' },
-          });
-          await updateEventMessage(client, updated);
-          console.log(`[PINGS] Event "${event.title}" marked ACTIVE and start ping sent.`);
-        } catch (err) {
-          console.error(`[PINGS] Failed to start event "${event.title}":`, err.message);
-        }
       }
     }
   }
