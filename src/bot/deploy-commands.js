@@ -17,6 +17,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('phnx-ping-reset')
     .setDescription('🔁 Re-arm reminder pings for upcoming events (leadership only)'),
+
+  new SlashCommandBuilder()
+    .setName('phnx-complete')
+    .setDescription('✅ Mark an event as completed and notify everyone (leadership only)'),
 ];
 
 async function registerCommands() {

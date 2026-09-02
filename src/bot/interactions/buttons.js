@@ -13,6 +13,7 @@ const { buildEventListEmbed, isUpcoming, sortByStart } = require('../commands/he
 const { isLeadershipUser } = require('../../utils/role-check');
 const { formatUtcDateTime, formatUtcInput, parseUtcInput } = require('../../utils/time');
 const { syncEventUpdate, cancelEventDiscord, deleteEventDiscord } = require('../events/event-actions');
+const { updateEventMessage, sendNotification } = require('../events/posting');
 
 const EPHEMERAL_FLAG = 64;
 const MAX_SELECT_OPTIONS = 25;
@@ -354,6 +355,63 @@ async function handleEditEvent(interaction) {
   await interaction.showModal(modal);
 }
 
+async function handleCompleteSelect(interaction) {
+  if (!isLeadershipUser(interaction)) {
+    await denyUnauthorized(interaction);
+    return;
+  }
+
+  const eventId = interaction.values[0];
+  const event = await prisma.event.findUnique({ where: { id: eventId } });
+  if (!event) {
+    await interaction.update({ content: '⚠️ Event not found.', components: [] });
+    return;
+  }
+
+  const row = confirmationRow(`phnx_confirm_complete:${event.id}`, '✅ Complete');
+  await interaction.update({
+    content: `Are you sure you want to mark **${event.title}** as completed?\n${formatUtcDateTime(event.startTime)}`,
+    components: [row],
+  });
+}
+
+async function handleConfirmComplete(interaction) {
+  if (!isLeadershipUser(interaction)) {
+    await denyUnauthorized(interaction);
+    return;
+  }
+
+  const eventId = idAfter(interaction.customId, 'phnx_confirm_complete:');
+  await interaction.deferUpdate();
+
+  try {
+    const event = await prisma.event.findUnique({ where: { id: eventId } });
+    if (!event) {
+      await interaction.editReply({ content: '⚠️ This event no longer exists.', components: [] });
+      return;
+    }
+    if (event.status === 'COMPLETED') {
+      await interaction.editReply({ content: 'ℹ️ This event is already completed.', components: [] });
+      return;
+    }
+
+    const updated = await prisma.event.update({
+      where: { id: event.id },
+      data: { status: 'COMPLETED' },
+    });
+    await updateEventMessage(interaction.client, updated);
+    await sendNotification(
+      interaction.client,
+      updated,
+      `@everyone ✅ **${updated.title}** has ended. Thanks everyone for attending!`
+    );
+    await interaction.editReply({ content: `✅ **"${updated.title}"** has been marked as completed.`, components: [] });
+  } catch (err) {
+    console.error('[BUTTONS] Confirm complete failed:', err.message);
+    await interaction.editReply({ content: '⚠️ Failed to complete the event.', components: [] }).catch(() => {});
+  }
+}
+
 async function handleModalSubmit(interaction) {
   if (!interaction.isModalSubmit()) return;
 
@@ -437,6 +495,10 @@ async function handleButtonInteraction(interaction) {
       await handleConfirmNo(interaction);
     } else if (customId.startsWith('phnx_edit:')) {
       await handleEditEvent(interaction);
+    } else if (customId === 'phnx_complete_select') {
+      await handleCompleteSelect(interaction);
+    } else if (customId.startsWith('phnx_confirm_complete:')) {
+      await handleConfirmComplete(interaction);
     } else {
       await interaction.reply({
         content: 'Unknown button.',

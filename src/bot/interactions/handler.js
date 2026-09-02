@@ -3,6 +3,7 @@ const { phnxMenu } = require('../commands/phnx-menu');
 const { todayCommand } = require('../commands/today');
 const { upcomingCommand } = require('../commands/upcoming');
 const { pingReset } = require('../commands/ping-reset');
+const { completeCommand } = require('../commands/complete');
 const { handleButtonInteraction, handleModalSubmit } = require('./buttons');
 
 const EPHEMERAL_FLAG = 64;
@@ -23,6 +24,9 @@ function onInteractionCreate(client) {
             break;
           case 'phnx-ping-reset':
             await pingReset(interaction);
+            break;
+          case 'phnx-complete':
+            await completeCommand(interaction);
             break;
           default:
             await interaction.reply({
