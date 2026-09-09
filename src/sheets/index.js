@@ -58,6 +58,9 @@ function signJwt(claim, privateKey) {
 }
 
 async function getAccessToken() {
+  if (!isConfigured()) {
+    throw new Error('Google Sheets is not configured (missing SPREADSHEET_ID or service account).');
+  }
   if (cachedToken.access_token && cachedToken.expires_at > Date.now() + 60000) {
     return cachedToken.access_token;
   }
@@ -119,7 +122,7 @@ async function sheetsRequest(path, { method = 'GET', body } = {}) {
 
 async function readValues(sheet, range) {
   const data = await sheetsRequest(
-    `/values/${quoteSheet(sheet)}!${range}?valueRenderOption=RAW`,
+    `/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`,
   );
   return data.values || [];
 }
@@ -144,6 +147,7 @@ async function appendRow(title, values) {
 }
 
 async function ensureHeaders() {
+  if (!isConfigured()) return;
   for (const { title, headers } of SHEETS) {
     const existing = await readValues(title, 'A1:A1');
     if (existing.length > 0 && existing[0]?.[0]) continue;
