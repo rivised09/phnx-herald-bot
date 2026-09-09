@@ -21,6 +21,18 @@ const commands = [
   new SlashCommandBuilder()
     .setName('phnx-complete')
     .setDescription('✅ Mark an event as completed and notify everyone (leadership only)'),
+
+  new SlashCommandBuilder()
+    .setName('phnx-tasks')
+    .setDescription('📋 Open the active task board'),
+
+  new SlashCommandBuilder()
+    .setName('phnx-tasks-setup')
+    .setDescription('🔧 (Re)create the permanent task panel in the tasks channel (leadership only)'),
+
+  new SlashCommandBuilder()
+    .setName('phnx-tasks-help')
+    .setDescription('❓ How the task system works'),
 ];
 
 async function registerCommands() {

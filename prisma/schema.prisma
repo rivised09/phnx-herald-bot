@@ -53,3 +53,52 @@ model DiscordChannel {
   @@index([guildId])
   @@index([type])
 }
+
+model Task {
+  id          String      @id @default(uuid())
+  guildId     String      @map("guild_id") @db.VarChar(40)
+  taskNumber  Int         @default(0) @map("task_number")
+  title       String
+  description String?
+  createdBy   String?     @map("created_by") @db.VarChar(40)
+  assignedTo  String?     @map("assigned_to") @db.VarChar(40)
+  status      String      @default("OPEN") @map("status") @db.VarChar(20)
+  progress    Int         @default(0)
+  priority    String      @default("NORMAL") @db.VarChar(10)
+  dueDate     DateTime?   @map("due_date")
+  completedAt DateTime?   @map("completed_at")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  updates TaskUpdate[]
+
+  @@map("tasks")
+
+  @@index([guildId])
+  @@index([status])
+  @@index([assignedTo])
+  @@index([taskNumber])
+}
+
+model TaskUpdate {
+  id        String   @id @default(uuid())
+  taskId    String   @map("task_id")
+  userId    String   @map("user_id") @db.VarChar(40)
+  progress  Int      @default(0)
+  status    String   @default("OPEN") @db.VarChar(20)
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("task_updates")
+
+  @@index([taskId])
+}
+
+model Setting {
+  key   String @id
+  value String
+
+  @@map("settings")
+}

@@ -5,6 +5,13 @@ const { upcomingCommand } = require('../commands/upcoming');
 const { pingReset } = require('../commands/ping-reset');
 const { completeCommand } = require('../commands/complete');
 const { handleButtonInteraction, handleModalSubmit } = require('./buttons');
+const {
+  handleTaskInteraction,
+  handleTaskModal,
+  taskBoardCommand,
+  taskSetupCommand,
+  openHelpCommand,
+} = require('../tasks/task-flows');
 
 const EPHEMERAL_FLAG = 64;
 
@@ -28,6 +35,15 @@ function onInteractionCreate(client) {
           case 'phnx-complete':
             await completeCommand(interaction);
             break;
+          case 'phnx-tasks':
+            await taskBoardCommand(interaction);
+            break;
+          case 'phnx-tasks-setup':
+            await taskSetupCommand(interaction);
+            break;
+          case 'phnx-tasks-help':
+            await openHelpCommand(interaction);
+            break;
           default:
             await interaction.reply({
               content: 'Unknown command.',
@@ -38,11 +54,19 @@ function onInteractionCreate(client) {
       }
 
       if (interaction.isButton() || interaction.isStringSelectMenu()) {
+        if (interaction.customId.startsWith('phnxt_')) {
+          await handleTaskInteraction(interaction);
+          return;
+        }
         await handleButtonInteraction(interaction);
         return;
       }
 
       if (interaction.isModalSubmit()) {
+        if (interaction.customId.startsWith('phnxt_modal_')) {
+          await handleTaskModal(interaction);
+          return;
+        }
         await handleModalSubmit(interaction);
         return;
       }

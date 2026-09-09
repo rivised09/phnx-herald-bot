@@ -6,6 +6,7 @@ const { registerCommands } = require('./bot/deploy-commands');
 const { enableScheduledEventSync } = require('./bot/events/guild-sync');
 const { enableChannelSync, syncChannels } = require('./bot/events/channel-sync');
 const { startPingScheduler } = require('./bot/events/pings');
+const { ensureTasksPanel } = require('./bot/tasks/task-panel');
 const { onInteractionCreate } = require('./bot/interactions/handler');
 
 validateEnv();
@@ -61,6 +62,7 @@ client.once('clientReady', async () => {
     await guild.members.fetch().catch(() => {});
     await registerCommands();
     scheduler = startPingScheduler(client);
+    await ensureTasksPanel(client);
   }
   await syncChannels(client);
   enableChannelSync(client);
