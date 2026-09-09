@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const prisma = require('../db');
 const { CONFIG } = require('../config');
 
 const TASKS_HEADERS = [
@@ -140,19 +141,37 @@ async function clearValues(sheet, range) {
 
 async function appendRow(title, values) {
   const res = await sheetsRequest(
-    `/values/${quoteSheet(title)}!A2:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    `/values/${quoteSheet(title)}!A3:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
     { method: 'POST', body: { values: [values] } },
   );
   return res.updates?.updatedRange || '';
 }
 
+async function migrateLegacyLayout() {
+  if (!isConfigured()) return;
+  for (const { title, headers } of SHEETS) {
+    const a1 = await readValues(title, 'A1:A1');
+    if (a1.length === 0 || a1[0][0] !== headers[0]) continue;
+
+    const endCol = String.fromCharCode(64 + headers.length);
+    const old = await readValues(title, `A2:${endCol}1000`);
+    const data = old.filter((r) => r.some((c) => c !== '' && c != null));
+
+    await clearValues(title, `A1:${endCol}1000`);
+    await writeValues(title, `A2:${endCol}2`, [headers]);
+    if (data.length > 0) {
+      await writeValues(title, `A3:${endCol}${2 + data.length}`, data);
+    }
+  }
+}
+
 async function ensureHeaders() {
   if (!isConfigured()) return;
   for (const { title, headers } of SHEETS) {
-    const existing = await readValues(title, 'A1:A1');
+    const existing = await readValues(title, 'A2:A2');
     if (existing.length > 0 && existing[0]?.[0]) continue;
     const cols = String.fromCharCode(64 + headers.length);
-    await writeValues(title, `A1:${cols}1`, [headers]);
+    await writeValues(title, `A2:${cols}2`, [headers]);
   }
 }
 
@@ -180,6 +199,10 @@ function resolveUser(id) {
   return id;
 }
 
+function resolveMentions(text) {
+  return String(text || '').replace(/<@!?(\d+)>/g, (m, id) => resolveUser(id) || m);
+}
+
 function taskRow(task) {
   return [
     taskTag(task),
@@ -199,9 +222,9 @@ function taskRow(task) {
 }
 
 async function findTaskRow(task) {
-  const colA = await readValues('TASKS', 'A2:A');
+  const colA = await readValues('TASKS', 'A3:A1000');
   const idx = colA.findIndex((row) => row[0] === taskTag(task));
-  return idx === -1 ? null : idx + 2;
+  return idx === -1 ? null : idx + 3;
 }
 
 async function safe(fn) {
@@ -224,6 +247,155 @@ async function syncTask(task) {
   }
 }
 
+async function reconcileTasks(tasks) {
+  if (!isConfigured()) return;
+  await ensureHeaders();
+  const rows = [...tasks]
+    .sort((a, b) => a.taskNumber - b.taskNumber)
+    .map(taskRow);
+  await clearValues('TASKS', 'A3:M1000');
+  if (rows.length > 0) {
+    await writeValues('TASKS', `A3:M${2 + rows.length}`, rows);
+  }
+}
+
+function parseSheetStatus(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (['open', 'todo'].includes(v)) return 'OPEN';
+  if (['in progress', 'inprogress', 'active', 'progress'].includes(v)) return 'IN_PROGRESS';
+  if (['completed', 'done', 'finished'].includes(v)) return 'COMPLETED';
+  return null;
+}
+
+function parseSheetPriority(value) {
+  const v = String(value || '').trim().toLowerCase();
+  const map = { low: 'LOW', normal: 'NORMAL', high: 'HIGH', max: 'HIGH', critical: 'HIGH' };
+  return map[v] || null;
+}
+
+function parseSheetProgress(value) {
+  const n = parseInt(String(value || '').replace(/[^0-9]/g, ''), 10);
+  if (Number.isNaN(n) || n < 0 || n > 100) return null;
+  return n;
+}
+
+function parseSheetDate(value) {
+  const v = String(value || '').trim();
+  if (!v) return null;
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const d = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`) : new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function resolveSheetUser(guild, value) {
+  const v = String(value || '').trim().replace(/^@/, '').replace(/!/g, '');
+  if (!v) return '';
+  if (/^\d{15,}$/.test(v)) return v;
+  const target = v.toLowerCase();
+  const found = [...(guild?.members?.cache?.values() || [])].find(
+    (m) => (m.nickname || m.user.username || '').toLowerCase() === target,
+  );
+  return found ? found.id : null;
+}
+
+async function importSheetChanges(guild) {
+  if (!isConfigured()) return 0;
+
+  const rows = await readValues('TASKS', 'A3:M1000');
+  let applied = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const tag = String(row[0] || '').trim();
+    if (!/^T-\d{3,}$/.test(tag)) continue;
+
+    const taskNumber = parseInt(tag.slice(2), 10);
+    const task = await prisma.task.findFirst({ where: { guildId: CONFIG.DISCORD.GUILD_ID, taskNumber } });
+    if (!task) continue;
+
+    const data = {};
+    const subjects = [];
+
+    const title = String(row[1] || '').trim();
+    if (title && title !== task.title) {
+      data.title = title;
+      subjects.push('title');
+    }
+
+    const desc = String(row[2] || '');
+    if (desc !== (task.description || '')) {
+      data.description = desc || null;
+      subjects.push('description');
+    }
+
+    const assignCell = resolveSheetUser(guild, row[4]);
+    if (assignCell !== null) {
+      const targetId = assignCell || null;
+      if (targetId !== task.assignedTo) {
+        data.assignedTo = targetId;
+        subjects.push(targetId ? `assigned → ${resolveUser(targetId)}` : 'unassigned');
+      }
+    }
+
+    const priority = parseSheetPriority(row[5]);
+    if (priority && priority !== task.priority) {
+      data.priority = priority;
+      subjects.push(`priority → ${priority.toLowerCase()}`);
+    }
+
+    const newStatus = parseSheetStatus(row[6]);
+    if (newStatus && newStatus !== task.status) {
+      data.status = newStatus;
+      subjects.push(`status → ${statusLabel(newStatus)}`);
+      if (newStatus === 'COMPLETED') {
+        data.progress = 100;
+        data.completedAt = new Date();
+      } else if (task.status === 'COMPLETED') {
+        data.completedAt = null;
+      }
+    }
+
+    const progress = parseSheetProgress(row[7]);
+    if (progress !== null && data.progress === undefined && progress !== task.progress) {
+      data.progress = progress;
+      subjects.push(`progress → ${progress}%`);
+    }
+
+    const dueDate = row[10] === undefined ? undefined : parseSheetDate(row[10]);
+    if (dueDate !== undefined) {
+      const current = fmtDate(task.dueDate);
+      if (dueDate !== current && (current || dueDate !== '')) {
+        data.dueDate = dueDate || null;
+        subjects.push(dueDate ? `due date → ${dueDate.slice(0, 10)}` : 'due date cleared');
+      }
+    }
+
+    if (Object.keys(data).length === 0) continue;
+
+    if (data.assignedTo !== undefined) {
+      data.claimedAt = data.assignedTo ? new Date() : null;
+    }
+
+    const updated = await prisma.task.update({ where: { id: task.id }, data });
+    const update = await prisma.taskUpdate.create({
+      data: {
+        taskId: task.id,
+        userId: 'system',
+        progress: updated.progress,
+        status: updated.status,
+        note: `Updated from spreadsheet: ${subjects.join(', ')}.`,
+      },
+    });
+
+    await syncTask(updated);
+    await syncTaskUpdate(updated, update);
+    applied++;
+  }
+
+  return applied;
+}
+
 async function syncTaskUpdate(task, update) {
   if (!isConfigured()) return;
   await ensureHeaders();
@@ -233,14 +405,14 @@ async function syncTaskUpdate(task, update) {
     resolveUser(update.userId),
     String(update.progress),
     statusLabel(update.status),
-    update.note || '',
+    resolveMentions(update.note),
     fmtDateTime(update.createdAt),
   ]);
 
   const match = updatedRange.match(/!A(\d+):/);
   if (match) {
     const rowNum = Number(match[1]);
-    const updateId = `U-${String(rowNum - 1).padStart(3, '0')}`;
+    const updateId = `U-${String(rowNum - 2).padStart(3, '0')}`;
     await writeValues('Task Updates', `A${rowNum}:A${rowNum}`, [[updateId]]);
   }
 }
@@ -267,19 +439,19 @@ async function syncMembers(guild) {
       ];
     });
 
-  await writeValues('MEMBERS', 'A1:F1', [MEMBERS_HEADERS]);
-  if (rows.length === 0) {
-    await writeValues('MEMBERS', 'A2:F2', [['', '', '', '', '', '']]);
-    return;
-  }
-  await clearValues('MEMBERS', 'A2:F1000');
-  await writeValues('MEMBERS', `A2:F${1 + rows.length}`, rows);
+  await writeValues('MEMBERS', 'A2:F2', [MEMBERS_HEADERS]);
+  if (rows.length === 0) return;
+  await clearValues('MEMBERS', 'A3:F1000');
+  await writeValues('MEMBERS', `A3:F${2 + rows.length}`, rows);
 }
 
 module.exports = {
   setClient,
   isConfigured,
   ensureHeaders,
+  migrateLegacyLayout,
+  reconcileTasks,
+  importSheetChanges,
   syncTask,
   syncTaskUpdate,
   syncMembers,
