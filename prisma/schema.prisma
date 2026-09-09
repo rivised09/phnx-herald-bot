@@ -66,6 +66,7 @@ model Task {
   progress    Int         @default(0)
   priority    String      @default("NORMAL") @db.VarChar(10)
   dueDate     DateTime?   @map("due_date")
+  claimedAt   DateTime?   @map("claimed_at")
   completedAt DateTime?   @map("completed_at")
   createdAt   DateTime    @default(now()) @map("created_at")
   updatedAt   DateTime    @updatedAt @map("updated_at")

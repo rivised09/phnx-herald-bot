@@ -8,6 +8,7 @@ const { enableChannelSync, syncChannels } = require('./bot/events/channel-sync')
 const { startPingScheduler } = require('./bot/events/pings');
 const { ensureTasksPanel } = require('./bot/tasks/task-panel');
 const { onInteractionCreate } = require('./bot/interactions/handler');
+const { setClient, ensureHeaders, syncMembers } = require('./sheets');
 
 validateEnv();
 
@@ -63,6 +64,15 @@ client.once('clientReady', async () => {
     await registerCommands();
     scheduler = startPingScheduler(client);
     await ensureTasksPanel(client);
+
+    setClient(client);
+    try {
+      await ensureHeaders();
+      await syncMembers(guild);
+      console.log('[SHEETS] Sync ready, spreadsheet configured.');
+    } catch (err) {
+      console.warn('[SHEETS] Initial sync skipped:', err.message);
+    }
   }
   await syncChannels(client);
   enableChannelSync(client);

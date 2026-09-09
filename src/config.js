@@ -1,4 +1,5 @@
 require('dotenv').config();
+const fs = require('fs');
 
 const requiredEnv = [
   'DISCORD_TOKEN',
@@ -23,6 +24,26 @@ function parseRoleIds(value) {
     .filter(Boolean);
 }
 
+function loadServiceAccount() {
+  const file = process.env.GOOGLE_SERVICE_ACCOUNT_FILE;
+  if (file) {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (err) {
+      console.warn(`[CONFIG] Could not read GOOGLE_SERVICE_ACCOUNT_FILE: ${err.message}`);
+    }
+  }
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch (err) {
+      console.warn(`[CONFIG] GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: ${err.message}`);
+    }
+  }
+  return null;
+}
+
 const CONFIG = {
   DISCORD: {
     TOKEN: process.env.DISCORD_TOKEN,
@@ -37,6 +58,8 @@ const CONFIG = {
 
   GOOGLE: {
     SPREADSHEET_URL: process.env.SPREADSHEET_URL || null,
+    SPREADSHEET_ID: process.env.SPREADSHEET_ID || null,
+    SERVICE_ACCOUNT: loadServiceAccount(),
   },
   ROLES: {
     LEADERSHIP: parseRoleIds(process.env.LEADERSHIP_ROLE_ID),

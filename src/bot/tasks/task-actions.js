@@ -1,5 +1,6 @@
 const prisma = require('../../db');
 const { CONFIG } = require('../../config');
+const { syncTask, syncTaskUpdate } = require('../../sheets');
 
 const TASK_STATUS = { OPEN: 'OPEN', IN_PROGRESS: 'IN_PROGRESS', COMPLETED: 'COMPLETED' };
 const TASK_STATUS_LABELS = {
@@ -18,7 +19,16 @@ function normalizePriority(value) {
 
 function normalizeStatus(value) {
   const v = String(value || '').trim().toUpperCase();
-  const map = { OPEN: 'OPEN', TODO: 'OPEN', 'IN PROGRESS': 'IN_PROGRESS', INPROGRESS: 'IN_PROGRESS', IN_PROGRESS: 'IN_PROGRESS', PROGRESS: 'IN_PROGRESS', COMPLETED: 'COMPLETED', DONE: 'COMPLETED', FINISHED: 'COMPLETED' };
+  const map = {
+    OPEN: 'OPEN',
+    TODO: 'OPEN',
+    'IN PROGRESS': 'IN_PROGRESS',
+    INPROGRESS: 'IN_PROGRESS',
+    PROGRESS: 'IN_PROGRESS',
+    COMPLETED: 'COMPLETED',
+    DONE: 'COMPLETED',
+    FINISHED: 'COMPLETED',
+  };
   return map[v] || null;
 }
 
@@ -50,6 +60,20 @@ async function nextTaskNumber(guildId) {
   return (last?.taskNumber || 0) + 1;
 }
 
+async function syncAfter(task, update, { completedBy } = {}) {
+  const snapshot = { ...task, completedBy: completedBy || (task.completedBy ? task.completedBy : null) };
+  try {
+    await syncTask(snapshot);
+  } catch (err) {
+    console.warn('[SHEETS] syncTask failed:', err.message);
+  }
+  try {
+    if (update) await syncTaskUpdate(snapshot, update);
+  } catch (err) {
+    console.warn('[SHEETS] syncTaskUpdate failed:', err.message);
+  }
+}
+
 async function createTask({ guildId, title, description, createdBy, assignedTo, priority, dueDate }) {
   const taskNumber = await nextTaskNumber(guildId);
   const task = await prisma.task.create({
@@ -62,11 +86,12 @@ async function createTask({ guildId, title, description, createdBy, assignedTo, 
       assignedTo: assignedTo || null,
       status: assignedTo ? TASK_STATUS.IN_PROGRESS : TASK_STATUS.OPEN,
       priority,
+      claimedAt: assignedTo ? new Date() : null,
       dueDate: dueDate || null,
     },
   });
 
-  await prisma.taskUpdate.create({
+  const update = await prisma.taskUpdate.create({
     data: {
       taskId: task.id,
       userId: createdBy || 'system',
@@ -78,6 +103,7 @@ async function createTask({ guildId, title, description, createdBy, assignedTo, 
     },
   });
 
+  await syncAfter(task, update);
   return task;
 }
 
@@ -88,10 +114,10 @@ async function claimTask(task, userId) {
 
   const updated = await prisma.task.update({
     where: { id: task.id },
-    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS },
+    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS, claimedAt: new Date() },
   });
 
-  await prisma.taskUpdate.create({
+  const update = await prisma.taskUpdate.create({
     data: {
       taskId: task.id,
       userId,
@@ -101,6 +127,7 @@ async function claimTask(task, userId) {
     },
   });
 
+  await syncAfter(updated, update);
   return { ok: true, task: updated };
 }
 
@@ -110,10 +137,11 @@ async function applyTaskUpdate(task, { userId, progress, status, note }) {
     data: { progress, status },
   });
 
-  await prisma.taskUpdate.create({
+  const update = await prisma.taskUpdate.create({
     data: { taskId: task.id, userId, progress, status, note: note || null },
   });
 
+  await syncAfter(updated, update);
   return updated;
 }
 
@@ -124,10 +152,10 @@ async function assignTaskToUser(task, userId, byUserId) {
 
   const updated = await prisma.task.update({
     where: { id: task.id },
-    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS },
+    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS, claimedAt: new Date() },
   });
 
-  await prisma.taskUpdate.create({
+  const update = await prisma.taskUpdate.create({
     data: {
       taskId: task.id,
       userId: byUserId || 'system',
@@ -137,6 +165,7 @@ async function assignTaskToUser(task, userId, byUserId) {
     },
   });
 
+  await syncAfter(updated, update);
   return { ok: true, task: updated };
 }
 
@@ -147,10 +176,10 @@ async function releaseTask(task, { userId, note }) {
 
   const updated = await prisma.task.update({
     where: { id: task.id },
-    data: { assignedTo: null, status: TASK_STATUS.OPEN, progress: 0 },
+    data: { assignedTo: null, status: TASK_STATUS.OPEN, progress: 0, claimedAt: null },
   });
 
-  await prisma.taskUpdate.create({
+  const update = await prisma.taskUpdate.create({
     data: {
       taskId: task.id,
       userId,
@@ -160,6 +189,7 @@ async function releaseTask(task, { userId, note }) {
     },
   });
 
+  await syncAfter(updated, update);
   return { ok: true, task: updated };
 }
 
@@ -169,16 +199,17 @@ async function completeTask(task, { userId, note }) {
     data: { progress: 100, status: TASK_STATUS.COMPLETED, completedAt: new Date() },
   });
 
-  await prisma.taskUpdate.create({
+  const update = await prisma.taskUpdate.create({
     data: {
       taskId: task.id,
       userId,
       progress: 100,
       status: TASK_STATUS.COMPLETED,
-      note: note ? `${note}` : null,
+      note: note || null,
     },
   });
 
+  await syncAfter(updated, update, { completedBy: userId });
   return updated;
 }
 
