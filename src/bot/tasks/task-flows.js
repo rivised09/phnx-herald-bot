@@ -3,11 +3,13 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  UserSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
 } = require('discord.js');
 const prisma = require('../../db');
+const { CONFIG } = require('../../config');
 const { isLeadershipUser } = require('../../utils/role-check');
 const {
   TASK_STATUS,
@@ -19,12 +21,13 @@ const {
   statusCounts,
   createTask,
   claimTask,
+  assignTaskToUser,
   applyTaskUpdate,
   releaseTask,
   completeTask,
   getUpdates,
 } = require('./task-actions');
-const { updateTasksPanel, rebuildTasksPanel } = require('./task-panel');
+const { updateTasksPanel, rebuildTasksPanel, refreshPanelMessage } = require('./task-panel');
 
 const EPHEMERAL_FLAG = 64;
 const PAGE_SIZE = 10;
@@ -281,6 +284,91 @@ async function showDetail(interaction, task, backCustomId, actionRow) {
   await interaction.update({ embeds: [buildDetailEmbed(task, updates)], components });
 }
 
+async function openAssigneeFlow(interaction) {
+  const tasks = await prisma.task.findMany({
+    where: {
+      guildId: interaction.guild.id,
+      status: { in: [TASK_STATUS.OPEN, TASK_STATUS.IN_PROGRESS] },
+    },
+    orderBy: { taskNumber: 'asc' },
+  });
+
+  if (tasks.length === 0) {
+    await interaction.reply({
+      content: 'No active tasks to assign.',
+      flags: EPHEMERAL_FLAG,
+    });
+    return;
+  }
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('phnxt_assign_task_select')
+    .setPlaceholder('Pick a task to assign…')
+    .setMaxValues(1)
+    .addOptions(
+      tasks.slice(0, 25).map((t) => ({
+        label: `${taskTag(t)} ${t.title}`.slice(0, 100),
+        description: `${TASK_STATUS_LABELS[t.status]} · ${t.progress}%`.slice(0, 100),
+        value: t.id,
+      })),
+    );
+
+  const row = new ActionRowBuilder().addComponents(select);
+  await interaction.reply({
+    flags: EPHEMERAL_FLAG,
+    embeds: [
+      {
+        color: 0xfb923c,
+        title: '👤 Assign a Task',
+        description: 'Select a task, then choose who to assign it to.',
+      },
+    ],
+    components: [row],
+  });
+}
+
+function userPickRow(customId, placeholder) {
+  const row = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder()
+      .setCustomId(customId)
+      .setPlaceholder(placeholder || 'Select a member…')
+      .setMaxValues(1),
+  );
+  return row;
+}
+
+async function applyAssignment(interaction, taskId) {
+  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  if (!task) {
+    await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
+    return;
+  }
+  if (task.status === TASK_STATUS.COMPLETED) {
+    await interaction.update({ content: '⚠️ A completed task cannot be reassigned.', embeds: [], components: [] });
+    return;
+  }
+
+  const userId = interaction.values?.[0];
+  if (!userId) {
+    await interaction.reply({ content: 'No member selected.', flags: EPHEMERAL_FLAG });
+    return;
+  }
+
+  const result = await assignTaskToUser(task, userId, interaction.user.id);
+  if (!result.ok) {
+    await interaction.update({ content: `⚠️ ${result.error}`, embeds: [], components: [] });
+    return;
+  }
+
+  const embed = {
+    color: 0x22c55e,
+    title: '👤 Task Assigned',
+    description: `**${taskTag(result.task)} ${result.task.title}**\n\nNow assigned to <@${userId}> and set to **In Progress**.`,
+  };
+  await interaction.update({ embeds: [embed], components: [] });
+  await updateTasksPanel(interaction.client);
+}
+
 async function handleTaskButton(interaction) {
   const id = interaction.customId;
 
@@ -306,6 +394,75 @@ async function handleTaskButton(interaction) {
   if (id === 'phnxt_open_claim') return openBoard(interaction, 'claim');
   if (id === 'phnxt_open_mine') return openBoard(interaction, 'mine');
   if (id === 'phnxt_open_archive') return openBoard(interaction, 'archive');
+
+  if (id.startsWith('phnxt_panel_filter:f')) {
+    const filter = id.slice('phnxt_panel_filter:f'.length);
+    await interaction.deferUpdate();
+    await refreshPanelMessage(interaction.client, 0, filter);
+    return;
+  }
+
+  if (id.startsWith('phnxt_panel_prev:p') || id.startsWith('phnxt_panel_next:p')) {
+    const { page, filter } = parseBoardParts(id);
+    const next = id.startsWith('phnxt_panel_next') ? page + 1 : page - 1;
+    await interaction.deferUpdate();
+    await refreshPanelMessage(interaction.client, next, filter);
+    return;
+  }
+
+  if (id === 'phnxt_open_sheet') {
+    const url = CONFIG.GOOGLE.SPREADSHEET_URL;
+    if (!url) {
+      await interaction.reply({
+        content: '📊 No spreadsheet link configured yet (`SPREADSHEET_URL`).',
+        flags: EPHEMERAL_FLAG,
+      });
+      return;
+    }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setStyle(ButtonStyle.Link)
+        .setLabel('📊 Open Spreadsheet')
+        .setURL(url),
+    );
+    const embed = {
+      color: 0xfb923c,
+      title: '📊 Task Spreadsheet',
+      description: `Here is the link to the PHW task spreadsheet:\n${url}`,
+    };
+    await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed], components: [row] });
+    return;
+  }
+
+  if (id === 'phnxt_open_assign') {
+    if (!isLeadershipUser(interaction.member)) {
+      await interaction.reply({
+        content: '⛔ Only leadership can assign tasks.',
+        flags: EPHEMERAL_FLAG,
+      });
+      return;
+    }
+    return openAssigneeFlow(interaction);
+  }
+
+  if (id === 'phnxt_assign_cancel') {
+    await interaction.update({ content: '✖️ Assignment cancelled.', embeds: [], components: [] });
+    return;
+  }
+
+  if (id === 'phnxt_new_skip') {
+    await interaction.update({
+      embeds: [
+        {
+          color: 0x22c55e,
+          title: '✅ Task Created',
+          description: 'Task was kept unassigned and is now available for members to claim.',
+        },
+      ],
+      components: [],
+    });
+    return;
+  }
 
   if (id === 'phnxt_open_new') {
     if (!isLeadershipUser(interaction.member)) {
@@ -335,10 +492,10 @@ async function handleTaskButton(interaction) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('phnxt_f_assign')
-          .setLabel('Assign To (leave empty to make claimable)')
+          .setLabel('Assign To (leave blank to pick)')
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
-          .setPlaceholder('Paste a user mention or ID'),
+          .setPlaceholder('Type a name/ID, or leave blank for the user picker'),
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -351,9 +508,10 @@ async function handleTaskButton(interaction) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('phnxt_f_due')
-          .setLabel('Due Date (YYYY-MM-DD, optional)')
+          .setLabel('Due Date (leave blank for none)')
           .setStyle(TextInputStyle.Short)
-          .setRequired(false),
+          .setRequired(false)
+          .setPlaceholder('YYYY-MM-DD'),
       ),
     );
     await interaction.showModal(modal);
@@ -601,7 +759,41 @@ async function handleTaskSelect(interaction) {
     return showDetail(interaction, task, backId, null);
   }
 
+  if (id === 'phnxt_assign_task_select') {
+    const updates = await getUpdates(task.id);
+    const userRow = new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(`phnxt_assign_user:${task.id}`)
+        .setPlaceholder('Search a member to assign…')
+        .setMaxValues(1),
+    );
+    const cancelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('phnxt_assign_cancel')
+        .setStyle(ButtonStyle.Secondary)
+        .setLabel('✖️ Cancel'),
+    );
+    await interaction.update({
+      embeds: [buildDetailEmbed(task, updates)],
+      components: [userRow, cancelRow],
+    });
+    return;
+  }
+
   await interaction.reply({ content: 'Unknown task action.', flags: EPHEMERAL_FLAG });
+}
+
+async function handleUserSelect(interaction) {
+  const id = interaction.customId;
+  if (id.startsWith('phnxt_assign_user:')) {
+    const taskId = id.slice('phnxt_assign_user:'.length);
+    return applyAssignment(interaction, taskId);
+  }
+  if (id.startsWith('phnxt_new_assign:')) {
+    const taskId = id.slice('phnxt_new_assign:'.length);
+    return applyAssignment(interaction, taskId);
+  }
+  await interaction.reply({ content: 'Unknown action.', flags: EPHEMERAL_FLAG });
 }
 
 async function handleTaskModal(interaction) {
@@ -642,6 +834,30 @@ async function handleTaskModal(interaction) {
       priority,
       dueDate: due.date,
     });
+
+    if (!task.assignedTo) {
+      const pickerEmbed = {
+        color: 0xfb923c,
+        title: '✅ Task Created',
+        description: [
+          `**${taskTag(task)} ${task.title}**`,
+          '',
+          'Created unassigned and available to claim.',
+          '',
+          'Want to assign it to a member now? Use the picker below (searchable).',
+        ].join('\n'),
+      };
+      const userRow = userPickRow(`phnxt_new_assign:${task.id}`, 'Search a member to assign…');
+      const skipRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('phnxt_new_skip')
+          .setStyle(ButtonStyle.Secondary)
+          .setLabel('Skip — leave in pool'),
+      );
+      await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [pickerEmbed], components: [userRow, skipRow] });
+      await updateTasksPanel(interaction.client);
+      return;
+    }
 
     const embed = {
       color: 0x22c55e,
@@ -782,12 +998,19 @@ async function handleTaskModal(interaction) {
 
 async function handleTaskInteraction(interaction) {
   if (interaction.isStringSelectMenu()) return handleTaskSelect(interaction);
+  if (interaction.isUserSelectMenu()) return handleUserSelect(interaction);
   return handleTaskButton(interaction);
 }
 
 async function taskBoardCommand(interaction) {
   const tasks = await queryBoard(interaction.guild.id, 'show', 'A', interaction.user.id);
   const payload = renderBoard({ flow: 'show', tasks, page: 0, filter: 'A' });
+  await interaction.reply({ flags: EPHEMERAL_FLAG, ...payload });
+}
+
+async function taskMyTasksCommand(interaction) {
+  const tasks = await queryBoard(interaction.guild.id, 'mine', 'A', interaction.user.id);
+  const payload = renderBoard({ flow: 'mine', tasks, page: 0, filter: 'A' });
   await interaction.reply({ flags: EPHEMERAL_FLAG, ...payload });
 }
 
@@ -812,9 +1035,12 @@ async function openHelpCommand(interaction) {
     color: 0xfb923c,
     title: '❓ PHW Task System Help',
     description:
-      'Use **📌 My Tasks** on the task panel to update progress, release, or complete your assigned tasks.\n\n'
-      + 'Use **🙋 Claim Task** to pick an unassigned task.\n\n'
-      + 'Use **📚 Archive** to review completed work.',
+      'The **task board** below the panel header updates automatically.\n\n'
+      + '**➕ New Task** — Leadership creates a task (can pick the assignee live).\n'
+      + '**👤 Assign Task** — Leadership assigns an existing task to a member.\n'
+      + '**🙋 Claim Task** — Claim an open task for yourself.\n'
+      + '**📊 View Spreadsheet** — Open the task google sheet.\n\n'
+      + 'Manage your own tasks (progress updates, release, complete) with `/phnx-mytasks`.',
   };
   await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
 }
@@ -823,6 +1049,7 @@ module.exports = {
   handleTaskInteraction,
   handleTaskModal,
   taskBoardCommand,
+  taskMyTasksCommand,
   taskSetupCommand,
   openHelpCommand,
   taskCountsEmbed,

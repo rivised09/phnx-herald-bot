@@ -34,6 +34,10 @@ const CONFIG = {
     REMINDERS: process.env.REMINDERS_CHANNEL_ID || null,
     TASKS: process.env.TASKS_CHANNEL_ID || null,
   },
+
+  GOOGLE: {
+    SPREADSHEET_URL: process.env.SPREADSHEET_URL || null,
+  },
   ROLES: {
     LEADERSHIP: parseRoleIds(process.env.LEADERSHIP_ROLE_ID),
   },

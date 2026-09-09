@@ -27,6 +27,10 @@ const commands = [
     .setDescription('📋 Open the active task board'),
 
   new SlashCommandBuilder()
+    .setName('phnx-mytasks')
+    .setDescription('📌 Your assigned tasks — update progress, release, or complete'),
+
+  new SlashCommandBuilder()
     .setName('phnx-tasks-setup')
     .setDescription('🔧 (Re)create the permanent task panel in the tasks channel (leadership only)'),
 

@@ -9,6 +9,7 @@ const {
   handleTaskInteraction,
   handleTaskModal,
   taskBoardCommand,
+  taskMyTasksCommand,
   taskSetupCommand,
   openHelpCommand,
 } = require('../tasks/task-flows');
@@ -38,6 +39,9 @@ function onInteractionCreate(client) {
           case 'phnx-tasks':
             await taskBoardCommand(interaction);
             break;
+          case 'phnx-mytasks':
+            await taskMyTasksCommand(interaction);
+            break;
           case 'phnx-tasks-setup':
             await taskSetupCommand(interaction);
             break;
@@ -53,7 +57,7 @@ function onInteractionCreate(client) {
         return;
       }
 
-      if (interaction.isButton() || interaction.isStringSelectMenu()) {
+      if (interaction.isButton() || interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
         if (interaction.customId.startsWith('phnxt_')) {
           await handleTaskInteraction(interaction);
           return;

@@ -117,6 +117,29 @@ async function applyTaskUpdate(task, { userId, progress, status, note }) {
   return updated;
 }
 
+async function assignTaskToUser(task, userId, byUserId) {
+  if (task.status === TASK_STATUS.COMPLETED) {
+    return { ok: false, error: 'A completed task cannot be reassigned.' };
+  }
+
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS },
+  });
+
+  await prisma.taskUpdate.create({
+    data: {
+      taskId: task.id,
+      userId: byUserId || 'system',
+      progress: task.progress,
+      status: TASK_STATUS.IN_PROGRESS,
+      note: `Assigned to <@${userId}> by <@${byUserId}>${byUserId ? '.' : ''}`,
+    },
+  });
+
+  return { ok: true, task: updated };
+}
+
 async function releaseTask(task, { userId, note }) {
   if (task.status === TASK_STATUS.COMPLETED) {
     return { ok: false, error: 'A completed task cannot be released.' };
@@ -179,6 +202,7 @@ module.exports = {
   statusCounts,
   createTask,
   claimTask,
+  assignTaskToUser,
   applyTaskUpdate,
   releaseTask,
   completeTask,
