@@ -1377,8 +1377,11 @@ async function handleTaskModal(interaction) {
         `**${taskTag(updated)} ${updated.title}**`,
         '',
         `Completed by <@${interaction.user.id}> · ${shortDate(updated.completedAt)}`,
+        updated.note ? `> 📝 ${updated.note}` : null,
         'The task has been moved to the 📚 Archive.',
-      ].join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
     };
     await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
     await updateTasksPanel(interaction.client);

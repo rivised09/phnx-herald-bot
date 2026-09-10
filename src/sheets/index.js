@@ -13,7 +13,7 @@ const { CONFIG } = require('../config');
 //             "Helper for Name" ARRAYFORMULA which the bot must not touch.
 
 const TASKS_HEADERS = ['ID (automated)', 'Task', 'Description', 'Assigned To', 'Status', 'Due'];
-const ARCHIVE_HEADERS = ['ID', 'Task', 'Description', 'Assigned To', 'Status', 'Due', 'Completed At'];
+const ARCHIVE_HEADERS = ['ID', 'Task', 'Description', 'Assigned To', 'Status', 'Due', 'Completed At', 'Note'];
 const UPDATES_HEADERS = ['Update ID', 'Task ID', 'Updated By', 'Progress', 'Status', 'Note', 'Timestamp'];
 const MEMBERS_HEADERS = ['Discord ID', 'Username', 'Nickname', 'Display Name', 'Roles', 'Active', 'Helper for Name'];
 
@@ -578,7 +578,7 @@ async function deleteTaskRow(idToken) {
   });
 }
 
-async function archiveTask(idToken) {
+async function archiveTask(idToken, note) {
   return withWriteLock(async () => {
     const row = await findTagRow('TASKS', idToken);
     if (!row) return null;
@@ -593,7 +593,7 @@ async function archiveTask(idToken) {
     if (archRow === -1) return null;
     const target = 3 + archRow;
 
-    await writeValues('ARCHIVE', `A${target}:G${target}`, [
+    await writeValues('ARCHIVE', `A${target}:H${target}`, [
       [
         id,
         String(data[COL.TASK] || ''),
@@ -602,6 +602,7 @@ async function archiveTask(idToken) {
         statusLabel('COMPLETED'),
         data[COL.DUE],
         toSerial(new Date()),
+        note || '',
       ],
     ]);
     await clearTaskRow(row);
@@ -610,6 +611,7 @@ async function archiveTask(idToken) {
     archived.id = id;
     archived.status = 'COMPLETED';
     archived.completedAt = new Date();
+    archived.note = note || '';
     return archived;
   });
 }

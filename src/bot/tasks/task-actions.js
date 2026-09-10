@@ -198,8 +198,8 @@ async function completeTask(task, { userId, note }) {
     note: note || null,
   });
 
-  const archived = await archiveTask(task.id);
-  return archived || { ...updated, completedAt: new Date() };
+  const archived = await archiveTask(task.id, note);
+  return archived || { ...updated, completedAt: new Date(), note: note || '' };
 }
 
 async function getUpdates(taskId, take = 10) {
