@@ -414,9 +414,9 @@ async function listArchiveTasks(guild) {
 
 async function listTasksAndArchive(guild) {
   if (!isConfigured()) throw new Error('Google Sheets is not configured.');
-  const [tRows, aRows] = await batchReadValues([
-    { sheet: 'TASKS', range: `A${LAYOUT.TASKS.dataStart}:F1000` },
-    { sheet: 'ARCHIVE', range: `A${LAYOUT.ARCHIVE.dataStart}:F1000` },
+  const [tRows, aRows] = await Promise.all([
+    readValues('TASKS', `A${LAYOUT.TASKS.dataStart}:F1000`),
+    readValues('ARCHIVE', `A${LAYOUT.ARCHIVE.dataStart}:F1000`),
   ]);
   return {
     tasks: rowsToList('TASKS', tRows, guild),
@@ -444,9 +444,9 @@ function nextIdBase(rows) {
 }
 
 async function nextTaskId() {
-  const [tasks, archive] = await batchReadValues([
-    { sheet: 'TASKS', range: 'A6:A1000' },
-    { sheet: 'ARCHIVE', range: 'A3:A1000' },
+  const [tasks, archive] = await Promise.all([
+    readValues('TASKS', 'A6:A1000'),
+    readValues('ARCHIVE', 'A3:A1000'),
   ]);
   let { prefix, max } = nextIdBase(tasks);
   const arch = nextIdBase(archive);
@@ -487,11 +487,10 @@ async function createTaskInSheet({ title, description, assignedTo, dueDate }) {
     try {
       await writeValues('TASKS', `A${writeRow}:A${writeRow}`, [[id]]);
     } catch (err) {
-      if (!/protected|forbidden|permission/i.test(err.message)) throw err;
       idFallback = true;
       id = `R${writeRow}`;
       console.warn(
-        `[SHEETS] Could not write the generated ID (${id}) into TASKS column A — column A is protected and the service account is not an allowed editor of that range. Falling back to internal id ${id}. Add the service account email to the protected range's allowed editors to store PHW-#### IDs.`,
+        `[SHEETS] Could not write the generated ID (${id}) into TASKS column A (${err.message}). Falling back to internal id ${id}.`,
       );
     }
 

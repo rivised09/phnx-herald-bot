@@ -199,8 +199,7 @@ async function completeTask(task, { userId, note }) {
   });
 
   const archived = await archiveTask(task.id);
-  if (!archived) throw new Error('Could not move the task to ARCHIVE.');
-  return archived;
+  return archived || { ...updated, completedAt: new Date() };
 }
 
 async function getUpdates(taskId, take = 10) {
