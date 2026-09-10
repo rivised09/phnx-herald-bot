@@ -197,33 +197,6 @@ async function readValues(sheet, range) {
   return value;
 }
 
-async function batchReadValues(ranges) {
-  const out = new Array(ranges.length);
-  const fresh = [];
-  ranges.forEach((r, i) => {
-    const key = cacheKey(r.sheet, r.range);
-    const hit = readCache.get(key);
-    if (hit && hit.expires > Date.now()) {
-      out[i] = hit.value;
-    } else {
-      fresh.push({ index: i, ...r });
-    }
-  });
-
-  if (fresh.length > 0) {
-    const query = fresh.map((r) => encodeURIComponent(`${quoteSheet(r.sheet)}!${r.range}`)).join('&ranges=');
-    const data = await sheetsRequest(`/values:batchGet?${query}&valueRenderOption=UNFORMATTED_VALUE`);
-    (data.valueRanges || []).forEach((vr, j) => {
-      const value = vr.values || [];
-      const item = fresh[j];
-      if (!item) return;
-      out[item.index] = value;
-      readCache.set(cacheKey(item.sheet, item.range), { value, expires: Date.now() + READ_CACHE_TTL });
-    });
-  }
-  return out;
-}
-
 function invalidateAllReadCache() {
   readCache.clear();
 }
