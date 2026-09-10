@@ -268,6 +268,36 @@ async function ensureHeaders() {
       layout.headers.slice(firstCol),
     ]);
   }
+  await applyDateFormats();
+}
+
+async function applyDateFormats() {
+  for (const [title, cols] of [['TASKS', [COL.DUE]], ['ARCHIVE', [COL.DUE, COL.DUE + 1]]]) {
+    const layout = LAYOUT[title];
+    try {
+      const sheetId = await getSheetId(title);
+      await sheetsRequest(':batchUpdate', {
+        method: 'POST',
+        body: {
+          requests: cols.map((c) => ({
+            updateCells: {
+              range: {
+                sheetId,
+                startRowIndex: layout.dataStart - 1,
+                endRowIndex: 1000,
+                startColumnIndex: c,
+                endColumnIndex: c + 1,
+              },
+              fields: 'userEnteredFormat.numberFormat',
+              rows: [{ values: [{ userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'mmmm d, yyyy' } } }] }],
+            },
+          })),
+        },
+      });
+    } catch (err) {
+      console.warn(`[SHEETS] Could not apply date format to ${title}: ${err.message}`);
+    }
+  }
 }
 
 // ---------- date helpers (Google Sheets stores dates as serial numbers) ----------
