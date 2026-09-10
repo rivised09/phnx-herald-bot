@@ -4,6 +4,7 @@ const { CONFIG } = require('../config');
 const healthRouter = require('./routes/health');
 const eventsRouter = require('./routes/events');
 const channelsRouter = require('./routes/channels');
+const sheetsRouter = require('./routes/sheets');
 
 function createApp(context) {
   const app = express();
@@ -13,6 +14,7 @@ function createApp(context) {
   app.use('/health', healthRouter);
   app.use('/api/events', eventsRouter(context));
   app.use('/api/channels', channelsRouter());
+  app.use('/api/sheets', sheetsRouter());
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

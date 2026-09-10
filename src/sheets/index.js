@@ -1,5 +1,4 @@
 const crypto = require('crypto');
-const prisma = require('../db');
 const { CONFIG } = require('../config');
 
 const TASKS_HEADERS = [
@@ -24,15 +23,44 @@ const MEMBERS_HEADERS = ['Discord ID', 'Username', 'Nickname', 'Display Name', '
 
 const SHEETS = [
   { title: 'TASKS', headers: TASKS_HEADERS },
-  { title: 'Task Updates', headers: UPDATES_HEADERS },
+  { title: 'TASK UPDATES', headers: UPDATES_HEADERS },
   { title: 'MEMBERS', headers: MEMBERS_HEADERS },
 ];
 
+const COL = {
+  TASK_ID: 0,
+  TITLE: 1,
+  DESCRIPTION: 2,
+  CREATED_BY: 3,
+  ASSIGNED_TO: 4,
+  PRIORITY: 5,
+  STATUS: 6,
+  PROGRESS: 7,
+  CREATED_AT: 8,
+  CLAIMED_AT: 9,
+  DUE_DATE: 10,
+  COMPLETED_AT: 11,
+  COMPLETED_BY: 12,
+};
+
 let client = null;
 let cachedToken = { access_token: null, expires_at: 0 };
+let sheetIdCache = {};
+
+// ---- write lock: serializes mutations so a task is never created/updated twice ----
+let writeQueue = Promise.resolve();
+function withWriteLock(fn) {
+  const run = writeQueue.then(fn, fn);
+  writeQueue = run.catch(() => {});
+  return run;
+}
 
 function setClient(botClient) {
   client = botClient;
+}
+
+function getGuild() {
+  return client?.guilds?.cache?.get(CONFIG.DISCORD.GUILD_ID) || null;
 }
 
 function isConfigured() {
@@ -79,15 +107,13 @@ async function getAccessToken() {
     sa.private_key,
   );
 
-  const body = new URLSearchParams({
-    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-    assertion,
-  });
-
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }).toString(),
   });
   const data = await res.json();
   if (!res.ok) {
@@ -122,9 +148,7 @@ async function sheetsRequest(path, { method = 'GET', body } = {}) {
 }
 
 async function readValues(sheet, range) {
-  const data = await sheetsRequest(
-    `/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`,
-  );
+  const data = await sheetsRequest(`/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`);
   return data.values || [];
 }
 
@@ -145,6 +169,34 @@ async function appendRow(title, values) {
     { method: 'POST', body: { values: [values] } },
   );
   return res.updates?.updatedRange || '';
+}
+
+async function getSheetId(title) {
+  if (sheetIdCache[title]) return sheetIdCache[title];
+  const data = await sheetsRequest('/?fields=sheets(sheetId,properties(title))');
+  for (const s of data.sheets || []) {
+    if (String(s.properties?.title) === title) {
+      sheetIdCache[title] = s.sheetId;
+      return s.sheetId;
+    }
+  }
+  throw new Error(`Sheet "${title}" not found`);
+}
+
+async function deleteDimensionRow(title, rowIndex1Based) {
+  const sheetId = await getSheetId(title);
+  await sheetsRequest(':batchUpdate', {
+    method: 'POST',
+    body: {
+      requests: [
+        {
+          deleteDimension: {
+            range: { sheetId, dimension: 'ROWS', startIndex: rowIndex1Based - 1, endIndex: rowIndex1Based },
+          },
+        },
+      ],
+    },
+  });
 }
 
 async function migrateLegacyLayout() {
@@ -175,6 +227,8 @@ async function ensureHeaders() {
   }
 }
 
+// ---------- formatting helpers ----------
+
 function fmtDate(d) {
   return d ? new Date(d).toISOString().slice(0, 10) : '';
 }
@@ -191,6 +245,10 @@ function statusLabel(status) {
   return status === 'COMPLETED' ? 'Completed' : status === 'IN_PROGRESS' ? 'In Progress' : 'Open';
 }
 
+function priorityLabel(priority) {
+  return (priority || 'NORMAL').charAt(0) + (priority || 'NORMAL').slice(1).toLowerCase();
+}
+
 function resolveUser(id) {
   if (!id) return '';
   const guild = client?.guilds?.cache?.get(CONFIG.DISCORD.GUILD_ID);
@@ -203,61 +261,7 @@ function resolveMentions(text) {
   return String(text || '').replace(/<@!?(\d+)>/g, (m, id) => resolveUser(id) || m);
 }
 
-function taskRow(task) {
-  return [
-    taskTag(task),
-    task.title || '',
-    task.description || '',
-    resolveUser(task.createdBy),
-    resolveUser(task.assignedTo),
-    (task.priority || 'NORMAL').charAt(0) + (task.priority || 'NORMAL').slice(1).toLowerCase(),
-    statusLabel(task.status),
-    String(task.progress),
-    fmtDateTime(task.createdAt),
-    fmtDateTime(task.claimedAt),
-    fmtDate(task.dueDate),
-    fmtDateTime(task.completedAt),
-    resolveUser(task.completedBy || (task.status === 'COMPLETED' ? task.assignedTo : null)),
-  ];
-}
-
-async function findTaskRow(task) {
-  const colA = await readValues('TASKS', 'A3:A1000');
-  const idx = colA.findIndex((row) => row[0] === taskTag(task));
-  return idx === -1 ? null : idx + 3;
-}
-
-async function safe(fn) {
-  try {
-    await fn();
-  } catch (err) {
-    console.warn('[SHEETS]', err.message);
-  }
-}
-
-async function syncTask(task) {
-  if (!isConfigured()) return;
-  await ensureHeaders();
-  const row = await findTaskRow(task);
-  const values = taskRow(task);
-  if (row) {
-    await writeValues('TASKS', `A${row}:M${row}`, [values]);
-  } else {
-    await appendRow('TASKS', values);
-  }
-}
-
-async function reconcileTasks(tasks) {
-  if (!isConfigured()) return;
-  await ensureHeaders();
-  const rows = [...tasks]
-    .sort((a, b) => a.taskNumber - b.taskNumber)
-    .map(taskRow);
-  await clearValues('TASKS', 'A3:M1000');
-  if (rows.length > 0) {
-    await writeValues('TASKS', `A3:M${2 + rows.length}`, rows);
-  }
-}
+// ---------- cell parsing helpers ----------
 
 function parseSheetStatus(value) {
   const v = String(value || '').trim().toLowerCase();
@@ -288,6 +292,20 @@ function parseSheetDate(value) {
   return d.toISOString();
 }
 
+function parseTimestamp(value) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  const d = new Date(s.replace(' UTC', 'Z').replace(' ', 'T'));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function parseDateCell(value) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function resolveSheetUser(guild, value) {
   const v = String(value || '').trim().replace(/^@/, '').replace(/!/g, '');
   if (!v) return '';
@@ -299,123 +317,169 @@ function resolveSheetUser(guild, value) {
   return found ? found.id : null;
 }
 
-async function importSheetChanges(guild) {
-  if (!isConfigured()) return 0;
+// ---------- task row mapping ----------
 
+function taskFromRow(row, guild) {
+  const tag = String(row[COL.TASK_ID] || '').trim();
+  const num = parseInt(tag.slice(2), 10);
+  const labelToId = (label) => {
+    const id = resolveSheetUser(guild, label);
+    return id || null;
+  };
+  return {
+    id: tag,
+    taskNumber: Number.isNaN(num) ? 0 : num,
+    title: String(row[COL.TITLE] || '').trim(),
+    description: String(row[COL.DESCRIPTION] || '') || null,
+    createdBy: labelToId(row[COL.CREATED_BY]),
+    assignedTo: labelToId(row[COL.ASSIGNED_TO]),
+    priority: parseSheetPriority(row[COL.PRIORITY]) || 'NORMAL',
+    status: parseSheetStatus(row[COL.STATUS]) || 'OPEN',
+    progress: parseSheetProgress(row[COL.PROGRESS]) ?? 0,
+    createdAt: parseTimestamp(row[COL.CREATED_AT]),
+    claimedAt: parseTimestamp(row[COL.CLAIMED_AT]),
+    dueDate: parseDateCell(row[COL.DUE_DATE]),
+    completedAt: parseTimestamp(row[COL.COMPLETED_AT]),
+    completedBy: labelToId(row[COL.COMPLETED_BY]),
+  };
+}
+
+async function findTagRow(title, tag) {
+  const a = await readValues(title, 'A3:A1000');
+  const idx = a.findIndex((r) => String(r[0] || '').trim() === tag);
+  return idx === -1 ? null : idx + 3;
+}
+
+// ---------- task store API ----------
+
+async function listTasks(guild) {
+  if (!isConfigured()) throw new Error('Google Sheets is not configured.');
   const rows = await readValues('TASKS', 'A3:M1000');
-  let applied = 0;
+  return rows
+    .map((row) => taskFromRow(row, guild))
+    .filter((t) => /^T-\d+$/.test(t.id));
+}
 
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const tag = String(row[0] || '').trim();
-    if (!/^T-\d{3,}$/.test(tag)) continue;
+async function nextTaskNumber() {
+  const a = await readValues('TASKS', 'A3:A1000');
+  let max = 0;
+  for (const r of a) {
+    const m = String(r[0] || '').trim().match(/^T-(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return max + 1;
+}
 
-    const taskNumber = parseInt(tag.slice(2), 10);
-    const task = await prisma.task.findFirst({ where: { guildId: CONFIG.DISCORD.GUILD_ID, taskNumber } });
-    if (!task) continue;
-
-    const data = {};
-    const subjects = [];
-
-    const title = String(row[1] || '').trim();
-    if (title && title !== task.title) {
-      data.title = title;
-      subjects.push('title');
-    }
-
-    const desc = String(row[2] || '');
-    if (desc !== (task.description || '')) {
-      data.description = desc || null;
-      subjects.push('description');
-    }
-
-    const assignCell = resolveSheetUser(guild, row[4]);
-    if (assignCell !== null) {
-      const targetId = assignCell || null;
-      if (targetId !== task.assignedTo) {
-        data.assignedTo = targetId;
-        subjects.push(targetId ? `assigned → ${resolveUser(targetId)}` : 'unassigned');
-      }
-    }
-
-    const priority = parseSheetPriority(row[5]);
-    if (priority && priority !== task.priority) {
-      data.priority = priority;
-      subjects.push(`priority → ${priority.toLowerCase()}`);
-    }
-
-    const newStatus = parseSheetStatus(row[6]);
-    if (newStatus && newStatus !== task.status) {
-      data.status = newStatus;
-      subjects.push(`status → ${statusLabel(newStatus)}`);
-      if (newStatus === 'COMPLETED') {
-        data.progress = 100;
-        data.completedAt = new Date();
-      } else if (task.status === 'COMPLETED') {
-        data.completedAt = null;
-      }
-    }
-
-    const progress = parseSheetProgress(row[7]);
-    if (progress !== null && data.progress === undefined && progress !== task.progress) {
-      data.progress = progress;
-      subjects.push(`progress → ${progress}%`);
-    }
-
-    const dueDate = row[10] === undefined ? undefined : parseSheetDate(row[10]);
-    if (dueDate !== undefined) {
-      const current = fmtDate(task.dueDate);
-      if (dueDate !== current && (current || dueDate !== '')) {
-        data.dueDate = dueDate || null;
-        subjects.push(dueDate ? `due date → ${dueDate.slice(0, 10)}` : 'due date cleared');
-      }
-    }
-
-    if (Object.keys(data).length === 0) continue;
-
-    if (data.assignedTo !== undefined) {
-      data.claimedAt = data.assignedTo ? new Date() : null;
-    }
-
-    const updated = await prisma.task.update({ where: { id: task.id }, data });
-    const update = await prisma.taskUpdate.create({
-      data: {
-        taskId: task.id,
-        userId: 'system',
-        progress: updated.progress,
-        status: updated.status,
-        note: `Updated from spreadsheet: ${subjects.join(', ')}.`,
-      },
+async function createTaskInSheet({ title, description, createdBy, assignedTo, priority, dueDate }) {
+  return withWriteLock(async () => {
+    const number = await nextTaskNumber();
+    const tag = `T-${String(number).padStart(3, '0')}`;
+    const now = new Date();
+    const status = assignedTo ? 'IN_PROGRESS' : 'OPEN';
+    const values = [
+      tag,
+      title,
+      description || '',
+      resolveUser(createdBy),
+      resolveUser(assignedTo),
+      priorityLabel(priority),
+      statusLabel(status),
+      '0',
+      fmtDateTime(now),
+      assignedTo ? fmtDateTime(now) : '',
+      fmtDate(dueDate),
+      '',
+      assignedTo ? resolveUser(assignedTo) : '',
+    ];
+    await appendRow('TASKS', values);
+    await appendUpdateRaw(tag, {
+      userId: createdBy || 'system',
+      progress: 0,
+      status,
+      note: assignedTo ? `Task created, assigned to <@${assignedTo}>.` : 'Task created, available to claim.',
     });
-
-    await syncTask(updated);
-    await syncTaskUpdate(updated, update);
-    applied++;
-  }
-
-  return applied;
+    return taskFromRow(values);
+  });
 }
 
-async function syncTaskUpdate(task, update) {
-  if (!isConfigured()) return;
-  await ensureHeaders();
-  const updatedRange = await appendRow('Task Updates', [
+async function updateTaskInSheet(tag, patch) {
+  return withWriteLock(async () => {
+    const idx = await findTagRow('TASKS', tag);
+    if (!idx) return null;
+    const current = await readValues('TASKS', `A${idx}:M${idx}`);
+    const row = current[0] || new Array(TASKS_HEADERS.length).fill('');
+
+    const apply = (i, v) => {
+      if (v !== undefined) row[i] = v;
+    };
+    apply(COL.TITLE, patch.title);
+    apply(COL.DESCRIPTION, patch.description === undefined ? undefined : patch.description || '');
+    apply(COL.CREATED_BY, patch.createdBy === undefined ? undefined : resolveUser(patch.createdBy));
+    apply(COL.ASSIGNED_TO, patch.assignedTo === undefined ? undefined : patch.assignedTo ? resolveUser(patch.assignedTo) : '');
+    apply(COL.PRIORITY, patch.priority === undefined ? undefined : priorityLabel(patch.priority));
+    apply(COL.STATUS, patch.status === undefined ? undefined : statusLabel(patch.status));
+    apply(COL.PROGRESS, patch.progress === undefined ? undefined : String(patch.progress));
+    apply(COL.CREATED_AT, patch.createdAt === undefined ? undefined : fmtDateTime(patch.createdAt));
+    apply(COL.CLAIMED_AT, patch.claimedAt === undefined ? undefined : fmtDateTime(patch.claimedAt));
+    apply(COL.DUE_DATE, patch.dueDate === undefined ? undefined : fmtDate(patch.dueDate));
+    apply(COL.COMPLETED_AT, patch.completedAt === undefined ? undefined : fmtDateTime(patch.completedAt));
+    apply(COL.COMPLETED_BY, patch.completedBy === undefined ? undefined : patch.completedBy ? resolveUser(patch.completedBy) : '');
+
+    await writeValues('TASKS', `A${idx}:M${idx}`, [row]);
+    return taskFromRow(row);
+  });
+}
+
+async function deleteTaskRow(tag) {
+  return withWriteLock(async () => {
+    const idx = await findTagRow('TASKS', tag);
+    if (!idx) return false;
+    await deleteDimensionRow('TASKS', idx);
+    return true;
+  });
+}
+
+async function appendUpdateRaw(tag, { userId, progress, status, note }) {
+  const res = await appendRow('TASK UPDATES', [
     '',
-    taskTag(task),
-    resolveUser(update.userId),
-    String(update.progress),
-    statusLabel(update.status),
-    resolveMentions(update.note),
-    fmtDateTime(update.createdAt),
+    tag,
+    resolveUser(userId),
+    String(progress),
+    statusLabel(status),
+    resolveMentions(note),
+    fmtDateTime(new Date()),
   ]);
-
-  const match = updatedRange.match(/!A(\d+):/);
-  if (match) {
-    const rowNum = Number(match[1]);
-    const updateId = `U-${String(rowNum - 2).padStart(3, '0')}`;
-    await writeValues('Task Updates', `A${rowNum}:A${rowNum}`, [[updateId]]);
+  const m = res.match(/!A(\d+):/);
+  if (m) {
+    const rowNum = Number(m[1]);
+    await writeValues('TASK UPDATES', `A${rowNum}:A${rowNum}`, [[`U-${String(rowNum - 2).padStart(3, '0')}`]]);
   }
+  return res;
 }
+
+async function appendTaskUpdate(tag, data) {
+  return withWriteLock(() => appendUpdateRaw(tag, data));
+}
+
+async function getTaskUpdates(tag, guild) {
+  const rows = await readValues('TASK UPDATES', 'A3:G1000');
+  const labelToId = (label) => {
+    const id = resolveSheetUser(guild, label);
+    return id || null;
+  };
+  return rows
+    .filter((r) => String(r[1] || '').trim() === tag)
+    .map((r) => ({
+      id: String(r[0] || '').trim(),
+      userId: labelToId(r[2]),
+      progress: parseSheetProgress(r[3]) ?? 0,
+      status: parseSheetStatus(r[4]) || tag,
+      note: String(r[5] || '') || null,
+      createdAt: parseTimestamp(r[6]),
+    }));
+}
+
+// ---------- members ----------
 
 async function syncMembers(guild) {
   if (!isConfigured()) return;
@@ -447,12 +511,16 @@ async function syncMembers(guild) {
 
 module.exports = {
   setClient,
+  getGuild,
   isConfigured,
   ensureHeaders,
   migrateLegacyLayout,
-  reconcileTasks,
-  importSheetChanges,
-  syncTask,
-  syncTaskUpdate,
+  listTasks,
+  nextTaskNumber,
+  createTaskInSheet,
+  updateTaskInSheet,
+  deleteTaskRow,
+  getTaskUpdates,
+  appendTaskUpdate,
   syncMembers,
 };

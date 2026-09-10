@@ -6,7 +6,7 @@ const {
 } = require('discord.js');
 const prisma = require('../../db');
 const { CONFIG } = require('../../config');
-const { statusCounts } = require('./task-actions');
+const { statusCounts, sheetTasks } = require('./task-actions');
 
 const EPHEMERAL_FLAG = 64;
 const TABLE_PAGE_SIZE = 6;
@@ -24,8 +24,8 @@ function settingKey(guildId) {
   return `tasks_panel_message_id:${guildId}`;
 }
 
-async function getPanelCounts(guildId) {
-  const tasks = await prisma.task.findMany({ where: { guildId }, select: { status: true } });
+async function getPanelCounts() {
+  const tasks = await sheetTasks();
   return statusCounts(tasks);
 }
 
@@ -129,6 +129,10 @@ function actionRowButtons() {
       .setCustomId('phnxt_open_sheet')
       .setStyle(ButtonStyle.Secondary)
       .setLabel('📊 View Spreadsheet'),
+    new ButtonBuilder()
+      .setCustomId('phnxt_open_delete')
+      .setStyle(ButtonStyle.Danger)
+      .setLabel('🗑 Delete Task'),
   );
   return row;
 }
@@ -178,15 +182,12 @@ async function fetchPanelMessage(client) {
   return message;
 }
 
-async function refreshPanelMessage(client, page = 0, filter = DEFAULT_PANEL_FILTER, guildId = CONFIG.DISCORD.GUILD_ID) {
+async function refreshPanelMessage(client, page = 0, filter = DEFAULT_PANEL_FILTER) {
   const message = await fetchPanelMessage(client);
   if (!message) return null;
 
   const safeFilter = PANEL_FILTER_LABELS[filter] ? filter : DEFAULT_PANEL_FILTER;
-  const tasks = await prisma.task.findMany({
-    where: { guildId },
-    orderBy: { taskNumber: 'asc' },
-  });
+  const tasks = await sheetTasks();
   const counts = statusCounts(tasks);
 
   const board = filterTasks(tasks, safeFilter);
@@ -207,8 +208,8 @@ async function refreshPanelMessage(client, page = 0, filter = DEFAULT_PANEL_FILT
   return totalPages;
 }
 
-async function updateTasksPanel(client, guildId = CONFIG.DISCORD.GUILD_ID) {
-  return refreshPanelMessage(client, 0, DEFAULT_PANEL_FILTER, guildId);
+async function updateTasksPanel(client) {
+  return refreshPanelMessage(client, 0, DEFAULT_PANEL_FILTER);
 }
 
 async function ensureTasksPanel(client) {
@@ -235,10 +236,7 @@ async function ensureTasksPanel(client) {
     }
   }
 
-  const tasks = await prisma.task.findMany({
-    where: { guildId: CONFIG.DISCORD.GUILD_ID },
-    orderBy: { taskNumber: 'asc' },
-  });
+  const tasks = await sheetTasks();
   const counts = statusCounts(tasks);
   const components = [
     actionRowButtons(),

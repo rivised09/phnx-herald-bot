@@ -1,6 +1,12 @@
-const prisma = require('../../db');
-const { CONFIG } = require('../../config');
-const { syncTask, syncTaskUpdate } = require('../../sheets');
+const {
+  listTasks,
+  getGuild,
+  createTaskInSheet,
+  updateTaskInSheet,
+  deleteTaskRow,
+  getTaskUpdates,
+  appendTaskUpdate,
+} = require('../../sheets');
 
 const TASK_STATUS = { OPEN: 'OPEN', IN_PROGRESS: 'IN_PROGRESS', COMPLETED: 'COMPLETED' };
 const TASK_STATUS_LABELS = {
@@ -33,7 +39,8 @@ function normalizeStatus(value) {
 }
 
 function taskTag(task) {
-  return `#${String(task.taskNumber).padStart(3, '0')}`;
+  if (task.id && /^T-\d+$/.test(task.id)) return task.id;
+  return `T-${String(task.taskNumber).padStart(3, '0')}`;
 }
 
 function taskLine(task) {
@@ -51,60 +58,22 @@ function statusCounts(tasks) {
   };
 }
 
-async function nextTaskNumber(guildId) {
-  const last = await prisma.task.findFirst({
-    where: { guildId },
-    orderBy: { taskNumber: 'desc' },
-    select: { taskNumber: true },
-  });
-  return (last?.taskNumber || 0) + 1;
+function sheetTasks() {
+  return listTasks(getGuild());
 }
 
-async function syncAfter(task, update, { completedBy } = {}) {
-  const snapshot = { ...task, completedBy: completedBy || (task.completedBy ? task.completedBy : null) };
-  try {
-    await syncTask(snapshot);
-  } catch (err) {
-    console.warn('[SHEETS] syncTask failed:', err.message);
-  }
-  try {
-    if (update) await syncTaskUpdate(snapshot, update);
-  } catch (err) {
-    console.warn('[SHEETS] syncTaskUpdate failed:', err.message);
-  }
+async function findTask(taskId) {
+  if (taskId == null) return null;
+  const tasks = await sheetTasks();
+  return (
+    tasks.find((t) => t.id === taskId) ||
+    tasks.find((t) => String(t.taskNumber) === String(taskId)) ||
+    null
+  );
 }
 
-async function createTask({ guildId, title, description, createdBy, assignedTo, priority, dueDate }) {
-  const taskNumber = await nextTaskNumber(guildId);
-  const task = await prisma.task.create({
-    data: {
-      guildId,
-      taskNumber,
-      title,
-      description: description || null,
-      createdBy: createdBy || null,
-      assignedTo: assignedTo || null,
-      status: assignedTo ? TASK_STATUS.IN_PROGRESS : TASK_STATUS.OPEN,
-      priority,
-      claimedAt: assignedTo ? new Date() : null,
-      dueDate: dueDate || null,
-    },
-  });
-
-  const update = await prisma.taskUpdate.create({
-    data: {
-      taskId: task.id,
-      userId: createdBy || 'system',
-      progress: 0,
-      status: task.status,
-      note: assignedTo
-        ? `Task created, assigned to <@${assignedTo}>.`
-        : 'Task created, available to claim.',
-    },
-  });
-
-  await syncAfter(task, update);
-  return task;
+async function createTask({ title, description, createdBy, assignedTo, priority, dueDate }) {
+  return createTaskInSheet({ title, description, createdBy, assignedTo, priority, dueDate });
 }
 
 async function claimTask(task, userId) {
@@ -112,36 +81,28 @@ async function claimTask(task, userId) {
     return { ok: false, error: 'This task can no longer be claimed.' };
   }
 
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS, claimedAt: new Date() },
+  const updated = await updateTaskInSheet(task.id, {
+    assignedTo: userId,
+    status: TASK_STATUS.IN_PROGRESS,
+    claimedAt: new Date(),
+  });
+  if (!updated) return { ok: false, error: 'That task no longer exists.' };
+
+  await appendTaskUpdate(task.id, {
+    userId,
+    progress: task.progress,
+    status: TASK_STATUS.IN_PROGRESS,
+    note: `Claimed by <@${userId}>.`,
   });
 
-  const update = await prisma.taskUpdate.create({
-    data: {
-      taskId: task.id,
-      userId,
-      progress: task.progress,
-      status: TASK_STATUS.IN_PROGRESS,
-      note: `Claimed by <@${userId}>.`,
-    },
-  });
-
-  await syncAfter(updated, update);
   return { ok: true, task: updated };
 }
 
 async function applyTaskUpdate(task, { userId, progress, status, note }) {
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: { progress, status },
-  });
+  const updated = await updateTaskInSheet(task.id, { progress, status });
+  if (!updated) throw new Error('Task no longer exists.');
 
-  const update = await prisma.taskUpdate.create({
-    data: { taskId: task.id, userId, progress, status, note: note || null },
-  });
-
-  await syncAfter(updated, update);
+  await appendTaskUpdate(task.id, { userId, progress, status, note: note || null });
   return updated;
 }
 
@@ -150,22 +111,20 @@ async function assignTaskToUser(task, userId, byUserId) {
     return { ok: false, error: 'A completed task cannot be reassigned.' };
   }
 
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: { assignedTo: userId, status: TASK_STATUS.IN_PROGRESS, claimedAt: new Date() },
+  const updated = await updateTaskInSheet(task.id, {
+    assignedTo: userId,
+    status: TASK_STATUS.IN_PROGRESS,
+    claimedAt: new Date(),
+  });
+  if (!updated) return { ok: false, error: 'That task no longer exists.' };
+
+  await appendTaskUpdate(task.id, {
+    userId: byUserId || 'system',
+    progress: task.progress,
+    status: TASK_STATUS.IN_PROGRESS,
+    note: `Assigned to <@${userId}> by <@${byUserId || 'system'}>.`,
   });
 
-  const update = await prisma.taskUpdate.create({
-    data: {
-      taskId: task.id,
-      userId: byUserId || 'system',
-      progress: task.progress,
-      status: TASK_STATUS.IN_PROGRESS,
-      note: `Assigned to <@${userId}> by <@${byUserId}>${byUserId ? '.' : ''}`,
-    },
-  });
-
-  await syncAfter(updated, update);
   return { ok: true, task: updated };
 }
 
@@ -174,51 +133,51 @@ async function releaseTask(task, { userId, note }) {
     return { ok: false, error: 'A completed task cannot be released.' };
   }
 
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: { assignedTo: null, status: TASK_STATUS.OPEN, progress: 0, claimedAt: null },
+  const updated = await updateTaskInSheet(task.id, {
+    assignedTo: null,
+    status: TASK_STATUS.OPEN,
+    progress: 0,
+    claimedAt: null,
+  });
+  if (!updated) return { ok: false, error: 'That task no longer exists.' };
+
+  await appendTaskUpdate(task.id, {
+    userId,
+    progress: 0,
+    status: TASK_STATUS.OPEN,
+    note: note ? `Released by <@${userId}>: ${note}` : `Released by <@${userId}>. Back to the pool.`,
   });
 
-  const update = await prisma.taskUpdate.create({
-    data: {
-      taskId: task.id,
-      userId,
-      progress: 0,
-      status: TASK_STATUS.OPEN,
-      note: note ? `Released by <@${userId}>: ${note}` : `Released by <@${userId}>. Back to the pool.`,
-    },
-  });
-
-  await syncAfter(updated, update);
   return { ok: true, task: updated };
 }
 
 async function completeTask(task, { userId, note }) {
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: { progress: 100, status: TASK_STATUS.COMPLETED, completedAt: new Date() },
+  const updated = await updateTaskInSheet(task.id, {
+    progress: 100,
+    status: TASK_STATUS.COMPLETED,
+    completedAt: new Date(),
+    completedBy: userId,
+  });
+  if (!updated) throw new Error('Task no longer exists.');
+
+  await appendTaskUpdate(task.id, {
+    userId,
+    progress: 100,
+    status: TASK_STATUS.COMPLETED,
+    note: note || null,
   });
 
-  const update = await prisma.taskUpdate.create({
-    data: {
-      taskId: task.id,
-      userId,
-      progress: 100,
-      status: TASK_STATUS.COMPLETED,
-      note: note || null,
-    },
-  });
-
-  await syncAfter(updated, update, { completedBy: userId });
   return updated;
 }
 
 async function getUpdates(taskId, take = 10) {
-  return prisma.taskUpdate.findMany({
-    where: { taskId },
-    orderBy: { createdAt: 'desc' },
-    take,
-  });
+  const updates = await getTaskUpdates(taskId, getGuild());
+  return [...updates].reverse().slice(0, take);
+}
+
+async function deleteTask(taskId) {
+  await deleteTaskRow(taskId);
+  return sheetTasks();
 }
 
 module.exports = {
@@ -231,6 +190,8 @@ module.exports = {
   taskTag,
   taskLine,
   statusCounts,
+  sheetTasks,
+  findTask,
   createTask,
   claimTask,
   assignTaskToUser,
@@ -238,4 +199,5 @@ module.exports = {
   releaseTask,
   completeTask,
   getUpdates,
+  deleteTask,
 };

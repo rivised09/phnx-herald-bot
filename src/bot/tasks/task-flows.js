@@ -8,7 +8,6 @@ const {
   TextInputBuilder,
   TextInputStyle,
 } = require('discord.js');
-const prisma = require('../../db');
 const { CONFIG } = require('../../config');
 const { isLeadershipUser } = require('../../utils/role-check');
 const {
@@ -19,6 +18,8 @@ const {
   normalizeStatus,
   taskTag,
   statusCounts,
+  sheetTasks,
+  findTask,
   createTask,
   claimTask,
   assignTaskToUser,
@@ -26,6 +27,7 @@ const {
   releaseTask,
   completeTask,
   getUpdates,
+  deleteTask,
 } = require('./task-actions');
 const { updateTasksPanel, rebuildTasksPanel, refreshPanelMessage } = require('./task-panel');
 
@@ -86,27 +88,21 @@ function parseDueDate(raw) {
   return { date: new Date(Date.UTC(year, month - 1, day)) };
 }
 
-async function taskCountsEmbed(guildId) {
-  const tasks = await prisma.task.findMany({ where: { guildId }, select: { status: true } });
+async function taskCountsEmbed() {
+  const tasks = await sheetTasks();
   const counts = statusCounts(tasks);
   return `📋 **Active Tasks:** ${counts.active}  ·  🟡 **In Progress:** ${counts.inProgress}  ·  🔵 **Open:** ${counts.open}  ·  ✅ **Done:** ${counts.completed}`;
 }
 
-async function queryBoard(guildId, flow, filter, userId) {
-  const where = { guildId };
+async function queryBoard(flow, filter, userId) {
+  const tasks = await sheetTasks();
   if (flow === 'show') {
-    if (filter && filter !== 'A') where.status = filter;
-    else where.status = { in: [TASK_STATUS.OPEN, TASK_STATUS.IN_PROGRESS] };
-  } else if (flow === 'claim') {
-    where.status = TASK_STATUS.OPEN;
-    where.assignedTo = null;
-  } else if (flow === 'mine') {
-    where.assignedTo = userId;
-    where.status = { not: TASK_STATUS.COMPLETED };
-  } else {
-    where.status = TASK_STATUS.COMPLETED;
+    if (filter && filter !== 'A') return tasks.filter((t) => t.status === filter);
+    return tasks.filter((t) => t.status === TASK_STATUS.OPEN || t.status === TASK_STATUS.IN_PROGRESS);
   }
-  return prisma.task.findMany({ where, orderBy: { taskNumber: 'asc' } });
+  if (flow === 'claim') return tasks.filter((t) => t.status === TASK_STATUS.OPEN && !t.assignedTo);
+  if (flow === 'mine') return tasks.filter((t) => t.assignedTo === userId && t.status !== TASK_STATUS.COMPLETED);
+  return tasks.filter((t) => t.status === TASK_STATUS.COMPLETED);
 }
 
 function renderBoard({ flow, tasks, page, filter }) {
@@ -216,13 +212,13 @@ function renderBoard({ flow, tasks, page, filter }) {
 }
 
 async function openBoard(interaction, flow, page = 0, filter = 'A') {
-  const tasks = await queryBoard(interaction.guild.id, flow, filter, interaction.user.id);
+  const tasks = await queryBoard(flow, filter, interaction.user.id);
   const payload = renderBoard({ flow, tasks, page, filter });
   await interaction.reply({ flags: EPHEMERAL_FLAG, ...payload });
 }
 
 async function rerenderBoard(interaction, flow, page, filter) {
-  const tasks = await queryBoard(interaction.guild.id, flow, filter, interaction.user.id);
+  const tasks = await queryBoard(flow, filter, interaction.user.id);
   const payload = renderBoard({ flow, tasks, page, filter });
   await interaction.update(payload);
 }
@@ -285,13 +281,9 @@ async function showDetail(interaction, task, backCustomId, actionRow) {
 }
 
 async function openAssigneeFlow(interaction) {
-  const tasks = await prisma.task.findMany({
-    where: {
-      guildId: interaction.guild.id,
-      status: { in: [TASK_STATUS.OPEN, TASK_STATUS.IN_PROGRESS] },
-    },
-    orderBy: { taskNumber: 'asc' },
-  });
+  const tasks = (await sheetTasks()).filter(
+    (t) => t.status === TASK_STATUS.OPEN || t.status === TASK_STATUS.IN_PROGRESS,
+  );
 
   if (tasks.length === 0) {
     await interaction.reply({
@@ -338,7 +330,7 @@ function userPickRow(customId, placeholder) {
 }
 
 async function applyAssignment(interaction, taskId) {
-  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  const task = await findTask(taskId);
   if (!task) {
     await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
     return;
@@ -445,6 +437,98 @@ async function handleTaskButton(interaction) {
     return openAssigneeFlow(interaction);
   }
 
+  if (id === 'phnxt_open_delete') {
+    if (!isLeadershipUser(interaction.member)) {
+      await interaction.reply({
+        content: '⛔ Only leadership can delete tasks.',
+        flags: EPHEMERAL_FLAG,
+      });
+      return;
+    }
+    const all = await sheetTasks();
+    if (all.length === 0) {
+      await interaction.reply({ content: 'There are no tasks to delete.', flags: EPHEMERAL_FLAG });
+      return;
+    }
+    const select = new StringSelectMenuBuilder()
+      .setCustomId('phnxt_delete_task_select')
+      .setPlaceholder('Pick a task to delete…')
+      .setMaxValues(1)
+      .addOptions(
+        all.slice(0, 25).map((t) => ({
+          label: `${taskTag(t)} ${t.title}`.slice(0, 100),
+          description: `${TASK_STATUS_LABELS[t.status]} · ${t.progress}%`.slice(0, 100),
+          value: t.id,
+        })),
+      );
+    const row = new ActionRowBuilder().addComponents(select);
+    await interaction.reply({
+      flags: EPHEMERAL_FLAG,
+      embeds: [
+        {
+          color: 0xef4444,
+          title: '🗑 Delete a Task',
+          description: 'Select a task to delete. This permanently removes it, its history, and its spreadsheet row.',
+        },
+      ],
+      components: [row],
+    });
+    return;
+  }
+
+  if (id.startsWith('phnxt_act_delete:')) {
+    const taskId = id.slice('phnxt_act_delete:'.length);
+    const task = await findTask(taskId);
+    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+      await interaction.update({ content: '⚠️ You can only delete your own tasks.', embeds: [], components: [] });
+      return;
+    }
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`phnxt_delete_yes:${task.id}`)
+        .setStyle(ButtonStyle.Danger)
+        .setLabel('🗑 Yes, Delete'),
+      new ButtonBuilder()
+        .setCustomId('phnxt_delete_no')
+        .setStyle(ButtonStyle.Secondary)
+        .setLabel('✖️ Cancel'),
+    );
+    return showDetail(interaction, task, null, confirmRow);
+  }
+
+  if (id === 'phnxt_delete_no') {
+    await interaction.update({ content: '✖️ Deletion cancelled.', embeds: [], components: [] });
+    return;
+  }
+
+  if (id.startsWith('phnxt_delete_yes:')) {
+    const taskId = id.slice('phnxt_delete_yes:'.length);
+    const task = await findTask(taskId);
+    if (!task) {
+      await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
+      return;
+    }
+    const isLead = isLeadershipUser(interaction.member);
+    if (!isLead && (!task.assignedTo || task.assignedTo !== interaction.user.id)) {
+      await interaction.update({ content: '⛔ You do not have permission to delete this task.', embeds: [], components: [] });
+      return;
+    }
+    const deleted = `${taskTag(task)} ${task.title}`;
+    await deleteTask(task.id);
+    await interaction.update({
+      embeds: [
+        {
+          color: 0xef4444,
+          title: '🗑 Task Deleted',
+          description: `**${deleted}**\n\nTask, its history, and its spreadsheet row were permanently removed.`,
+        },
+      ],
+      components: [],
+    });
+    await updateTasksPanel(interaction.client);
+    return;
+  }
+
   if (id === 'phnxt_assign_cancel') {
     await interaction.update({ content: '✖️ Assignment cancelled.', embeds: [], components: [] });
     return;
@@ -540,7 +624,7 @@ async function handleTaskButton(interaction) {
 
     if (id.startsWith('phnxt_claim_yes:')) {
       const taskId = id.slice('phnxt_claim_yes:'.length);
-      const task = await prisma.task.findUnique({ where: { id: taskId } });
+      const task = await findTask(taskId);
       if (!task) {
         await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
         return;
@@ -603,7 +687,7 @@ async function handleTaskButton(interaction) {
 
   if (id.startsWith('phnxt_act_update:')) {
     const taskId = id.slice('phnxt_act_update:'.length);
-    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    const task = await findTask(taskId);
     if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only update your own tasks.', flags: EPHEMERAL_FLAG });
       return;
@@ -642,7 +726,7 @@ async function handleTaskButton(interaction) {
 
   if (id.startsWith('phnxt_act_release:')) {
     const taskId = id.slice('phnxt_act_release:'.length);
-    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    const task = await findTask(taskId);
     if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only release your own tasks.', flags: EPHEMERAL_FLAG });
       return;
@@ -665,7 +749,7 @@ async function handleTaskButton(interaction) {
 
   if (id.startsWith('phnxt_act_complete:')) {
     const taskId = id.slice('phnxt_act_complete:'.length);
-    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    const task = await findTask(taskId);
     if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only complete your own tasks.', flags: EPHEMERAL_FLAG });
       return;
@@ -696,7 +780,7 @@ async function handleTaskSelect(interaction) {
     await interaction.reply({ content: 'No task selected.', flags: EPHEMERAL_FLAG });
     return;
   }
-  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  const task = await findTask(taskId);
   if (!task) {
     await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
     return;
@@ -746,6 +830,10 @@ async function handleTaskSelect(interaction) {
         .setStyle(ButtonStyle.Success)
         .setLabel('✅ Complete'),
       new ButtonBuilder()
+        .setCustomId(`phnxt_act_delete:${task.id}`)
+        .setStyle(ButtonStyle.Danger)
+        .setLabel('🗑 Delete'),
+      new ButtonBuilder()
         .setCustomId('phnxt_mine_back')
         .setStyle(ButtonStyle.Secondary)
         .setLabel('⬅️ Back'),
@@ -757,6 +845,20 @@ async function handleTaskSelect(interaction) {
     const { page } = parseBoardParts(id);
     const backId = `phnxt_back_archive:p${page}`;
     return showDetail(interaction, task, backId, null);
+  }
+
+  if (id.startsWith('phnxt_delete_task_select')) {
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`phnxt_delete_yes:${task.id}`)
+        .setStyle(ButtonStyle.Danger)
+        .setLabel('🗑 Yes, Delete'),
+      new ButtonBuilder()
+        .setCustomId('phnxt_delete_no')
+        .setStyle(ButtonStyle.Secondary)
+        .setLabel('✖️ Cancel'),
+    );
+    return showDetail(interaction, task, null, confirmRow);
   }
 
   if (id === 'phnxt_assign_task_select') {
@@ -880,7 +982,7 @@ async function handleTaskModal(interaction) {
 
   if (id.startsWith('phnxt_modal_update:')) {
     const taskId = id.slice('phnxt_modal_update:'.length);
-    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    const task = await findTask(taskId);
     if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only update your own tasks.', flags: EPHEMERAL_FLAG });
       return;
@@ -940,7 +1042,7 @@ async function handleTaskModal(interaction) {
 
   if (id.startsWith('phnxt_modal_release:')) {
     const taskId = id.slice('phnxt_modal_release:'.length);
-    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    const task = await findTask(taskId);
     if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only release your own tasks.', flags: EPHEMERAL_FLAG });
       return;
@@ -969,7 +1071,7 @@ async function handleTaskModal(interaction) {
 
   if (id.startsWith('phnxt_modal_complete:')) {
     const taskId = id.slice('phnxt_modal_complete:'.length);
-    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    const task = await findTask(taskId);
     if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only complete your own tasks.', flags: EPHEMERAL_FLAG });
       return;
@@ -1003,13 +1105,13 @@ async function handleTaskInteraction(interaction) {
 }
 
 async function taskBoardCommand(interaction) {
-  const tasks = await queryBoard(interaction.guild.id, 'show', 'A', interaction.user.id);
+  const tasks = await queryBoard('show', 'A', interaction.user.id);
   const payload = renderBoard({ flow: 'show', tasks, page: 0, filter: 'A' });
   await interaction.reply({ flags: EPHEMERAL_FLAG, ...payload });
 }
 
 async function taskMyTasksCommand(interaction) {
-  const tasks = await queryBoard(interaction.guild.id, 'mine', 'A', interaction.user.id);
+  const tasks = await queryBoard('mine', 'A', interaction.user.id);
   const payload = renderBoard({ flow: 'mine', tasks, page: 0, filter: 'A' });
   await interaction.reply({ flags: EPHEMERAL_FLAG, ...payload });
 }
