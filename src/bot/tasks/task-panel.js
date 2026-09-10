@@ -122,6 +122,24 @@ function actionRowButtons() {
       .setStyle(ButtonStyle.Success)
       .setLabel('➕ New Task'),
     new ButtonBuilder()
+      .setCustomId('phnxt_panel_edit')
+      .setStyle(ButtonStyle.Primary)
+      .setLabel('✏️ Edit'),
+    new ButtonBuilder()
+      .setCustomId('phnxt_panel_complete')
+      .setStyle(ButtonStyle.Success)
+      .setLabel('✅ Mark Complete'),
+    new ButtonBuilder()
+      .setCustomId('phnxt_open_delete')
+      .setStyle(ButtonStyle.Danger)
+      .setLabel('🗑 Delete'),
+  );
+  return row;
+}
+
+function secondaryRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
       .setCustomId('phnxt_open_assign')
       .setStyle(ButtonStyle.Primary)
       .setLabel('👤 Assign Task'),
@@ -133,12 +151,7 @@ function actionRowButtons() {
       .setCustomId('phnxt_open_sheet')
       .setStyle(ButtonStyle.Secondary)
       .setLabel('📊 View Spreadsheet'),
-    new ButtonBuilder()
-      .setCustomId('phnxt_open_delete')
-      .setStyle(ButtonStyle.Danger)
-      .setLabel('🗑 Delete Task'),
   );
-  return row;
 }
 
 function filterButtonsRow(activeFilter) {
@@ -153,6 +166,15 @@ function filterButtonsRow(activeFilter) {
     );
   }
   return row;
+}
+
+function refreshRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('phnxt_panel_refresh')
+      .setStyle(ButtonStyle.Secondary)
+      .setLabel('🔄 Refresh'),
+  );
 }
 
 function paginationButtonsRow(page, totalPages, filter) {
@@ -194,18 +216,20 @@ async function refreshPanelMessage(client, page = 0, filter = DEFAULT_PANEL_FILT
   const tasks = await sheetTasks();
   const counts = statusCounts(tasks);
 
-  const board = filterTasks(tasks, safeFilter);
+  const board = safeFilter === 'DONE' ? filterTasks(await archiveTasks(), safeFilter) : filterTasks(tasks, safeFilter);
   const totalPages = Math.max(1, Math.ceil(board.length / TABLE_PAGE_SIZE));
   const guild = message.channel.guild;
 
   const components = [
     actionRowButtons(),
+    secondaryRow(),
     filterButtonsRow(safeFilter),
     paginationButtonsRow(page, totalPages, safeFilter),
+    refreshRow(),
   ];
 
   await message.edit({
-    embeds: [buildPanelEmbed(counts), buildTaskTableEmbed(guild, tasks, page, safeFilter)],
+    embeds: [buildPanelEmbed(counts), buildTaskTableEmbed(guild, board, page, safeFilter)],
     components,
   });
 
@@ -244,8 +268,10 @@ async function ensureTasksPanel(client) {
   const counts = statusCounts(tasks);
   const components = [
     actionRowButtons(),
+    secondaryRow(),
     filterButtonsRow(DEFAULT_PANEL_FILTER),
     paginationButtonsRow(0, Math.max(1, Math.ceil(counts.active / TABLE_PAGE_SIZE)), DEFAULT_PANEL_FILTER),
+    refreshRow(),
   ];
 
   const message = await channel.send({

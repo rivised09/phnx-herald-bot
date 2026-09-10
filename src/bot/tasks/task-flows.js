@@ -9,6 +9,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { CONFIG } = require('../../config');
+const { invalidateAllReadCache } = require('../../sheets');
 const { isLeadershipUser } = require('../../utils/role-check');
 const {
   TASK_STATUS,
@@ -358,6 +359,115 @@ async function applyAssignment(interaction, taskId) {
   await updateTasksPanel(interaction.client);
 }
 
+async function openEditModal(interaction, task) {
+  if (!canManageTask(interaction.member, task)) {
+    await interaction.reply({
+      content: '⛔ You can only edit your own tasks (leadership can edit any).',
+      flags: EPHEMERAL_FLAG,
+    });
+    return false;
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`phnxt_modal_edit:${task.id}`)
+    .setTitle('✏️ Edit Task');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('phnxt_f_title')
+        .setLabel('Task Name')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setValue(task.title.slice(0, 100)),
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('phnxt_f_desc')
+        .setLabel('Description')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setValue((task.description || '').slice(0, 1024)),
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('phnxt_f_due')
+        .setLabel('Due Date (YYYY-MM-DD)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : ''),
+    ),
+  );
+  await interaction.showModal(modal);
+  return true;
+}
+
+async function openCompleteModal(interaction, task) {
+  if (!canManageTask(interaction.member, task)) {
+    await interaction.reply({
+      content: '⛔ You can only complete your own tasks (leadership can complete any).',
+      flags: EPHEMERAL_FLAG,
+    });
+    return false;
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`phnxt_modal_complete:${task.id}`)
+    .setTitle('✅ Complete Task');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('phnxt_f_note')
+        .setLabel('Final Note')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false),
+    ),
+  );
+  await interaction.showModal(modal);
+  return true;
+}
+
+function pickTaskRow(customId, placeholder, tasks) {
+  const row = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(customId)
+      .setPlaceholder(placeholder)
+      .setMaxValues(1)
+      .addOptions(
+        tasks.slice(0, 25).map((t) => ({
+          label: `${taskTag(t)} ${t.title}`.slice(0, 100),
+          description: `${TASK_STATUS_LABELS[t.status]} · ${t.dueDate ? `Due ${shortDate(t.dueDate)}` : 'No due date'}`.slice(0, 100),
+          value: t.id,
+        })),
+      ),
+  );
+  return row;
+}
+
+async function openTaskPickerFlow(interaction, { customId, placeholder, title, color, filter }) {
+  const tasks = (await sheetTasks()).filter(filter);
+  if (tasks.length === 0) {
+    await interaction.reply({ content: 'No tasks available right now.', flags: EPHEMERAL_FLAG });
+    return;
+  }
+  const row = pickTaskRow(customId, placeholder, tasks);
+  const cancelRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('phnxt_assign_cancel')
+      .setStyle(ButtonStyle.Secondary)
+      .setLabel('✖️ Cancel'),
+  );
+  await interaction.reply({
+    flags: EPHEMERAL_FLAG,
+    embeds: [{ color, title, description: 'Pick a task from the dropdown.' }],
+    components: [row, cancelRow],
+  });
+}
+
+function canManageTask(member, task) {
+  return (
+    isLeadershipUser(member) ||
+    (task.assignedTo != null && task.assignedTo === (member?.id || member?.user?.id || null))
+  );
+}
+
 async function handleTaskButton(interaction) {
   const id = interaction.customId;
 
@@ -383,6 +493,16 @@ async function handleTaskButton(interaction) {
   if (id === 'phnxt_open_claim') return openBoard(interaction, 'claim');
   if (id === 'phnxt_open_mine') return openBoard(interaction, 'mine');
   if (id === 'phnxt_open_archive') return openBoard(interaction, 'archive');
+
+  if (id === 'phnxt_panel_refresh') {
+    await interaction.deferUpdate();
+    invalidateAllReadCache();
+    await updateTasksPanel(interaction.client);
+    await interaction
+      .followUp({ content: '🔄 Refreshed from the spreadsheet.', flags: EPHEMERAL_FLAG })
+      .catch(() => {});
+    return;
+  }
 
   if (id.startsWith('phnxt_panel_filter:f')) {
     const filter = id.slice('phnxt_panel_filter:f'.length);
@@ -471,6 +591,33 @@ async function handleTaskButton(interaction) {
       components: [row],
     });
     return;
+  }
+
+  if (id === 'phnxt_panel_edit') {
+    const canAct = (t) =>
+      isLeadershipUser(interaction.member) ||
+      (t.assignedTo != null && t.assignedTo === interaction.user.id);
+    return openTaskPickerFlow(interaction, {
+      customId: 'phnxt_panel_edit_select',
+      placeholder: 'Pick a task to edit…',
+      title: '✏️ Edit a Task',
+      color: 0x3b82f6,
+      filter: canAct,
+    });
+  }
+
+  if (id === 'phnxt_panel_complete') {
+    const canAct = (t) =>
+      t.status !== 'COMPLETED' &&
+      t.status !== 'CANCELLED' &&
+      (isLeadershipUser(interaction.member) || (t.assignedTo != null && t.assignedTo === interaction.user.id));
+    return openTaskPickerFlow(interaction, {
+      customId: 'phnxt_panel_complete_select',
+      placeholder: 'Pick a task to complete…',
+      title: '✅ Mark Complete',
+      color: 0x22c55e,
+      filter: canAct,
+    });
   }
 
   if (id.startsWith('phnxt_act_delete:')) {
@@ -677,50 +824,18 @@ async function handleTaskButton(interaction) {
   if (id.startsWith('phnxt_act_edit:')) {
     const taskId = id.slice('phnxt_act_edit:'.length);
     const task = await findTask(taskId);
-    if (!task || (!isLeadershipUser(interaction.member) && (!task.assignedTo || task.assignedTo !== interaction.user.id))) {
-      await interaction.reply({
-        content: '⛔ You can only edit your own tasks (leadership can edit any).',
-        flags: EPHEMERAL_FLAG,
-      });
+    if (!task) {
+      await interaction.reply({ content: '⚠️ That task no longer exists.', flags: EPHEMERAL_FLAG });
       return;
     }
-    const modal = new ModalBuilder()
-      .setCustomId(`phnxt_modal_edit:${taskId}`)
-      .setTitle('✏️ Edit Task');
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('phnxt_f_title')
-          .setLabel('Task Name')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setValue(task.title.slice(0, 100)),
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('phnxt_f_desc')
-          .setLabel('Description')
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(false)
-          .setValue((task.description || '').slice(0, 1024)),
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('phnxt_f_due')
-          .setLabel('Due Date (YYYY-MM-DD)')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : ''),
-      ),
-    );
-    await interaction.showModal(modal);
+    await openEditModal(interaction, task);
     return;
   }
 
   if (id.startsWith('phnxt_act_update:')) {
     const taskId = id.slice('phnxt_act_update:'.length);
     const task = await findTask(taskId);
-    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+    if (!task || (!isLeadershipUser(interaction.member) && task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only update your own tasks.', flags: EPHEMERAL_FLAG });
       return;
     }
@@ -751,7 +866,7 @@ async function handleTaskButton(interaction) {
   if (id.startsWith('phnxt_act_release:')) {
     const taskId = id.slice('phnxt_act_release:'.length);
     const task = await findTask(taskId);
-    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+    if (!task || (!isLeadershipUser(interaction.member) && task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only release your own tasks.', flags: EPHEMERAL_FLAG });
       return;
     }
@@ -774,7 +889,7 @@ async function handleTaskButton(interaction) {
   if (id.startsWith('phnxt_act_complete:')) {
     const taskId = id.slice('phnxt_act_complete:'.length);
     const task = await findTask(taskId);
-    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+    if (!task || (!isLeadershipUser(interaction.member) && task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only complete your own tasks.', flags: EPHEMERAL_FLAG });
       return;
     }
@@ -861,23 +976,29 @@ async function handleTaskSelect(interaction) {
     return;
   }
 
+  if (id === 'phnxt_panel_edit_select') {
+    await openEditModal(interaction, task);
+    return;
+  }
+
+  if (id === 'phnxt_panel_complete_select') {
+    await openCompleteModal(interaction, task);
+    return;
+  }
+
   if (id.startsWith('phnxt_show_select')) {
     const { page, filter } = parseBoardParts(id);
     const backId = `phnxt_back_show:p${page}:f${filter}`;
-    const canAct =
-      isLeadershipUser(interaction.member) || (task.assignedTo && task.assignedTo === interaction.user.id);
-    const actionRow = canAct
-      ? new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`phnxt_act_edit:${task.id}`)
-            .setStyle(ButtonStyle.Primary)
-            .setLabel('✏️ Edit'),
-          new ButtonBuilder()
-            .setCustomId(`phnxt_act_complete:${task.id}`)
-            .setStyle(ButtonStyle.Success)
-            .setLabel('✅ Mark Complete'),
-        )
-      : null;
+    const actionRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`phnxt_act_edit:${task.id}`)
+        .setStyle(ButtonStyle.Primary)
+        .setLabel('✏️ Edit'),
+      new ButtonBuilder()
+        .setCustomId(`phnxt_act_complete:${task.id}`)
+        .setStyle(ButtonStyle.Success)
+        .setLabel('✅ Mark Complete'),
+    );
     return showDetail(interaction, task, backId, actionRow);
   }
 
@@ -1157,7 +1278,7 @@ async function handleTaskModal(interaction) {
   if (id.startsWith('phnxt_modal_update:')) {
     const taskId = id.slice('phnxt_modal_update:'.length);
     const task = await findTask(taskId);
-    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+    if (!task || (!isLeadershipUser(interaction.member) && task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only update your own tasks.', flags: EPHEMERAL_FLAG });
       return;
     }
@@ -1212,7 +1333,7 @@ async function handleTaskModal(interaction) {
   if (id.startsWith('phnxt_modal_release:')) {
     const taskId = id.slice('phnxt_modal_release:'.length);
     const task = await findTask(taskId);
-    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+    if (!task || (!isLeadershipUser(interaction.member) && task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only release your own tasks.', flags: EPHEMERAL_FLAG });
       return;
     }
@@ -1241,7 +1362,7 @@ async function handleTaskModal(interaction) {
   if (id.startsWith('phnxt_modal_complete:')) {
     const taskId = id.slice('phnxt_modal_complete:'.length);
     const task = await findTask(taskId);
-    if (!task || (task.assignedTo && task.assignedTo !== interaction.user.id)) {
+    if (!task || (!isLeadershipUser(interaction.member) && task.assignedTo && task.assignedTo !== interaction.user.id)) {
       await interaction.reply({ content: '⚠️ You can only complete your own tasks.', flags: EPHEMERAL_FLAG });
       return;
     }

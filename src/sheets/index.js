@@ -13,7 +13,7 @@ const { CONFIG } = require('../config');
 //             "Helper for Name" ARRAYFORMULA which the bot must not touch.
 
 const TASKS_HEADERS = ['ID (automated)', 'Task', 'Description', 'Assigned To', 'Status', 'Due'];
-const ARCHIVE_HEADERS = ['ID', 'Task', 'Description', 'Assigned To', 'Status', 'Due'];
+const ARCHIVE_HEADERS = ['ID', 'Task', 'Description', 'Assigned To', 'Status', 'Due', 'Completed At'];
 const UPDATES_HEADERS = ['Update ID', 'Task ID', 'Updated By', 'Progress', 'Status', 'Note', 'Timestamp'];
 const MEMBERS_HEADERS = ['Discord ID', 'Username', 'Nickname', 'Display Name', 'Roles', 'Active', 'Helper for Name'];
 
@@ -138,29 +138,94 @@ async function getAccessToken() {
 
 async function sheetsRequest(path, { method = 'GET', body } = {}) {
   const token = await getAccessToken();
-  const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.GOOGLE.SPREADSHEET_ID}${path}`,
-    {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
+  const maxAttempts = 4;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.GOOGLE.SPREADSHEET_ID}${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
       },
-      body: body ? JSON.stringify(body) : undefined,
-    },
-  );
-  const data = res.status === 204 ? null : await res.json();
-  if (!res.ok) {
-    throw new Error(`Sheets API ${res.status}: ${JSON.stringify(data)}`);
+    );
+    const data = res.status === 204 ? null : await res.json();
+
+    if (res.status === 429 || res.status === 408 || res.status === 425) {
+      if (attempt === maxAttempts - 1) {
+        throw new Error(`Sheets API ${res.status}: ${JSON.stringify(data)}`);
+      }
+      const retryAfter = Number(data?.error?.details?.[0]?.body?.match(/(\d+)s/)?.[1] || 0) * 1000;
+      const delay = (retryAfter || 700 * 2 ** attempt) + Math.floor(Math.random() * 250);
+      console.warn(`[SHEETS] Rate limited (${res.status}), retrying in ${Math.round(delay)}ms...`);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
+    if (!res.ok) {
+      throw new Error(`Sheets API ${res.status}: ${JSON.stringify(data)}`);
+    }
+    return data;
   }
-  return data;
+  throw new Error(`Sheets API request failed after ${maxAttempts} attempts.`);
+}
+
+const readCache = new Map();
+const READ_CACHE_TTL = 20000;
+
+function invalidateSheetReadCache(title) {
+  const prefix = `${title}:`;
+  for (const key of [...readCache.keys()]) {
+    if (key.startsWith(prefix)) readCache.delete(key);
+  }
+}
+
+function cacheKey(sheet, range) {
+  return `${sheet}:${range}`;
 }
 
 async function readValues(sheet, range) {
-  const data = await sheetsRequest(
-    `/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`,
-  );
-  return data.values || [];
+  const key = cacheKey(sheet, range);
+  const hit = readCache.get(key);
+  if (hit && hit.expires > Date.now()) return hit.value;
+
+  const data = await sheetsRequest(`/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`);
+  const value = data.values || [];
+  readCache.set(key, { value, expires: Date.now() + READ_CACHE_TTL });
+  return value;
+}
+
+async function batchReadValues(ranges) {
+  const out = new Array(ranges.length);
+  const fresh = [];
+  ranges.forEach((r, i) => {
+    const key = cacheKey(r.sheet, r.range);
+    const hit = readCache.get(key);
+    if (hit && hit.expires > Date.now()) {
+      out[i] = hit.value;
+    } else {
+      fresh.push({ index: i, ...r });
+    }
+  });
+
+  if (fresh.length > 0) {
+    const query = fresh.map((r) => encodeURIComponent(`${quoteSheet(r.sheet)}!${r.range}`)).join('&ranges=');
+    const data = await sheetsRequest(`/values:batchGet?${query}&valueRenderOption=UNFORMATTED_VALUE`);
+    (data.valueRanges || []).forEach((vr, j) => {
+      const value = vr.values || [];
+      const item = fresh[j];
+      if (!item) return;
+      out[item.index] = value;
+      readCache.set(cacheKey(item.sheet, item.range), { value, expires: Date.now() + READ_CACHE_TTL });
+    });
+  }
+  return out;
+}
+
+function invalidateAllReadCache() {
+  readCache.clear();
 }
 
 async function writeValues(sheet, range, values) {
@@ -168,6 +233,7 @@ async function writeValues(sheet, range, values) {
     method: 'PUT',
     body: { values },
   });
+  invalidateSheetReadCache(sheet);
 }
 
 async function appendRow(title, values) {
@@ -175,11 +241,13 @@ async function appendRow(title, values) {
     `/values/${quoteSheet(title)}!A3:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
     { method: 'POST', body: { values: [values] } },
   );
+  invalidateSheetReadCache(title);
   return res.updates?.updatedRange || '';
 }
 
 async function clearValues(sheet, range) {
   await sheetsRequest(`/values/${quoteSheet(sheet)}!${range}:clear`, { method: 'POST', body: {} });
+  invalidateSheetReadCache(sheet);
 }
 
 async function getSheetId(title) {
@@ -208,6 +276,7 @@ async function deleteDimensionRow(title, rowIndex1Based) {
       ],
     },
   });
+  invalidateSheetReadCache(title);
 }
 
 async function clearTaskRow(rowIndex1Based) {
@@ -346,8 +415,12 @@ async function findTagRow(title, idToken) {
 
 async function listRows(title, guild) {
   if (!isConfigured()) throw new Error('Google Sheets is not configured.');
+  const rows = await readValues(title, `A${LAYOUT[title].dataStart}:F1000`);
+  return rowsToList(title, rows, guild);
+}
+
+function rowsToList(title, rows, guild) {
   const layout = LAYOUT[title];
-  const rows = await readValues(title, `A${layout.dataStart}:F1000`);
   const list = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -364,6 +437,18 @@ async function listTasks(guild) {
 
 async function listArchiveTasks(guild) {
   return listRows('ARCHIVE', guild);
+}
+
+async function listTasksAndArchive(guild) {
+  if (!isConfigured()) throw new Error('Google Sheets is not configured.');
+  const [tRows, aRows] = await batchReadValues([
+    { sheet: 'TASKS', range: `A${LAYOUT.TASKS.dataStart}:F1000` },
+    { sheet: 'ARCHIVE', range: `A${LAYOUT.ARCHIVE.dataStart}:F1000` },
+  ]);
+  return {
+    tasks: rowsToList('TASKS', tRows, guild),
+    archived: rowsToList('ARCHIVE', aRows, guild),
+  };
 }
 
 function nextIdBase(rows) {
@@ -386,9 +471,9 @@ function nextIdBase(rows) {
 }
 
 async function nextTaskId() {
-  const [tasks, archive] = await Promise.all([
-    readValues('TASKS', 'A6:A1000'),
-    readValues('ARCHIVE', 'A3:A1000'),
+  const [tasks, archive] = await batchReadValues([
+    { sheet: 'TASKS', range: 'A6:A1000' },
+    { sheet: 'ARCHIVE', range: 'A3:A1000' },
   ]);
   let { prefix, max } = nextIdBase(tasks);
   const arch = nextIdBase(archive);
@@ -506,7 +591,7 @@ async function archiveTask(idToken) {
     if (archRow === -1) return null;
     const target = 3 + archRow;
 
-    await writeValues('ARCHIVE', `A${target}:F${target}`, [
+    await writeValues('ARCHIVE', `A${target}:G${target}`, [
       [
         id,
         String(data[COL.TASK] || ''),
@@ -514,6 +599,7 @@ async function archiveTask(idToken) {
         String(data[COL.ASSIGNED_TO] || ''),
         statusLabel('COMPLETED'),
         data[COL.DUE],
+        toSerial(new Date()),
       ],
     ]);
     await clearTaskRow(row);
@@ -603,8 +689,10 @@ module.exports = {
   getGuild,
   isConfigured,
   ensureHeaders,
+  invalidateAllReadCache,
   listTasks,
   listArchiveTasks,
+  listTasksAndArchive,
   createTaskInSheet,
   updateTaskInSheet,
   deleteTaskRow,

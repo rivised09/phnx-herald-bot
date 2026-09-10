@@ -74,10 +74,18 @@ function archiveTasks() {
 async function findTask(taskId) {
   if (taskId == null) return null;
   const tasks = await sheetTasks();
-  return (
+  const found =
     tasks.find((t) => t.id === taskId) ||
     tasks.find((t) => t.row === taskId) ||
     tasks.find((t) => String(t.row) === String(taskId)) ||
+    null;
+  if (found) return found;
+
+  const archived = await archiveTasks();
+  return (
+    archived.find((t) => t.id === taskId) ||
+    archived.find((t) => t.row === taskId) ||
+    archived.find((t) => String(t.row) === String(taskId)) ||
     null
   );
 }

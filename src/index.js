@@ -8,7 +8,7 @@ const { enableChannelSync, syncChannels } = require('./bot/events/channel-sync')
 const { startPingScheduler } = require('./bot/events/pings');
 const { ensureTasksPanel } = require('./bot/tasks/task-panel');
 const { onInteractionCreate } = require('./bot/interactions/handler');
-const { setClient, ensureHeaders, syncMembers, listTasks, listArchiveTasks, isConfigured } = require('./sheets');
+const { setClient, ensureHeaders, syncMembers, listTasksAndArchive, isConfigured } = require('./sheets');
 const { updateTasksPanel } = require('./bot/tasks/task-panel');
 
 validateEnv();
@@ -76,16 +76,9 @@ client.once('clientReady', async () => {
         let membersTick = 0;
         const refreshBoardFromSheet = async () => {
           try {
-            const [tasks, archived] = await Promise.all([listTasks(guild), listArchiveTasks(guild)]);
+            const { tasks, archived } = await listTasksAndArchive(guild);
             const signature = JSON.stringify(
-              [...tasks, ...archived].map((t) => [
-                t.id,
-                t.title,
-                t.description,
-                t.assignedTo,
-                t.status,
-                t.dueDate,
-              ]),
+              [...tasks, ...archived].map((t) => [t.id, t.title, t.description, t.assignedTo, t.status, t.dueDate]),
             );
             if (signature !== lastSignature) {
               lastSignature = signature;
@@ -104,9 +97,9 @@ client.once('clientReady', async () => {
           }
         };
 
-        setTimeout(refreshBoardFromSheet, 2000);
-        setInterval(refreshBoardFromSheet, 5000);
-        console.log('[SHEETS] Spreadsheet → Discord sync every 5s.');
+        setTimeout(refreshBoardFromSheet, 3000);
+        setInterval(refreshBoardFromSheet, 30000);
+        console.log('[SHEETS] Spreadsheet → Discord sync every 30s (manual 🔄 Refresh for instant).');
       } catch (err) {
         console.warn('[SHEETS] Initial sync skipped:', err.message);
       }
