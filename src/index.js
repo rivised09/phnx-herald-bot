@@ -8,7 +8,7 @@ const { enableChannelSync, syncChannels } = require('./bot/events/channel-sync')
 const { startPingScheduler } = require('./bot/events/pings');
 const { ensureTasksPanel } = require('./bot/tasks/task-panel');
 const { onInteractionCreate } = require('./bot/interactions/handler');
-const { setClient, ensureHeaders, syncMembers, listTasks, isConfigured } = require('./sheets');
+const { setClient, ensureHeaders, syncMembers, listTasks, listArchiveTasks, isConfigured } = require('./sheets');
 const { updateTasksPanel } = require('./bot/tasks/task-panel');
 
 validateEnv();
@@ -76,31 +76,24 @@ client.once('clientReady', async () => {
         let membersTick = 0;
         const refreshBoardFromSheet = async () => {
           try {
-            const tasks = await listTasks(guild);
+            const [tasks, archived] = await Promise.all([listTasks(guild), listArchiveTasks(guild)]);
             const signature = JSON.stringify(
-              tasks.map((t) => [
+              [...tasks, ...archived].map((t) => [
                 t.id,
                 t.title,
                 t.description,
                 t.assignedTo,
-                t.priority,
                 t.status,
-                t.progress,
-                t.createdBy,
-                t.createdAt,
-                t.claimedAt,
                 t.dueDate,
-                t.completedAt,
-                t.completedBy,
               ]),
             );
             if (signature !== lastSignature) {
               lastSignature = signature;
               await updateTasksPanel(client);
-              console.log(`[SHEETS] Task board refreshed from spreadsheet (${tasks.length} task(s)).`);
+              console.log(`[SHEETS] Task board refreshed from spreadsheet (${tasks.length} active, ${archived.length} archived).`);
             }
             membersTick++;
-            if (membersTick >= 13) {
+            if (membersTick >= 60) {
               membersTick = 0;
               await guild.members.fetch().catch(() => {});
               await syncMembers(guild);
@@ -111,8 +104,9 @@ client.once('clientReady', async () => {
           }
         };
 
-        setTimeout(refreshBoardFromSheet, 5000);
-        setInterval(refreshBoardFromSheet, 45000);
+        setTimeout(refreshBoardFromSheet, 2000);
+        setInterval(refreshBoardFromSheet, 5000);
+        console.log('[SHEETS] Spreadsheet → Discord sync every 5s.');
       } catch (err) {
         console.warn('[SHEETS] Initial sync skipped:', err.message);
       }

@@ -151,6 +151,35 @@ async function releaseTask(task, { userId, note }) {
   return { ok: true, task: updated };
 }
 
+async function editTask(task, { userId, title, description, dueDate }) {
+  const patch = {};
+  if (title !== undefined) patch.title = title;
+  if (description !== undefined) patch.description = description || null;
+  if (dueDate !== undefined) patch.dueDate = dueDate;
+  if (Object.keys(patch).length === 0) return { ok: true, task };
+
+  const updated = await updateTaskInSheet(task.id, patch);
+  if (!updated) return { ok: false, error: 'That task no longer exists.' };
+
+  const changes = [];
+  if (patch.title !== undefined) changes.push(`Title: ${patch.title}`);
+  if (patch.description !== undefined) changes.push('Description updated');
+  if (patch.dueDate !== undefined) {
+    changes.push(
+      patch.dueDate
+        ? `Due: ${new Date(patch.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+        : 'Due date removed',
+    );
+  }
+  await appendTaskUpdate(task.id, {
+    userId,
+    status: updated.status,
+    note: changes.length ? `Edited by <@${userId}>: ${changes.join(', ')}` : `Edited by <@${userId}>.`,
+  });
+
+  return { ok: true, task: updated };
+}
+
 async function completeTask(task, { userId, note }) {
   const updated = await updateTaskInSheet(task.id, { status: TASK_STATUS.COMPLETED });
   if (!updated) throw new Error('Task no longer exists.');
@@ -192,6 +221,7 @@ module.exports = {
   assignTaskToUser,
   applyTaskUpdate,
   releaseTask,
+  editTask,
   completeTask,
   getUpdates,
   deleteTask,

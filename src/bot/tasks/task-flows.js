@@ -25,6 +25,7 @@ const {
   assignTaskToUser,
   applyTaskUpdate,
   releaseTask,
+  editTask,
   completeTask,
   getUpdates,
   deleteTask,
@@ -260,10 +261,13 @@ function buildDetailEmbed(task, updates) {
   return embed;
 }
 
-async function showDetail(interaction, task, backCustomId, actionRow) {
+async function showDetail(interaction, task, backCustomId, actionRows) {
   const updates = await getUpdates(task.id);
   const components = [];
-  if (actionRow) components.push(actionRow);
+  if (actionRows) {
+    const rows = Array.isArray(actionRows) ? actionRows : [actionRows];
+    for (const row of rows) components.push(row);
+  }
   if (backCustomId) {
     const backRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(backCustomId).setStyle(ButtonStyle.Secondary).setLabel('⬅️ Back to list'),
@@ -670,6 +674,49 @@ async function handleTaskButton(interaction) {
     return rerenderBoard(interaction, 'claim', page);
   }
 
+  if (id.startsWith('phnxt_act_edit:')) {
+    const taskId = id.slice('phnxt_act_edit:'.length);
+    const task = await findTask(taskId);
+    if (!task || (!isLeadershipUser(interaction.member) && (!task.assignedTo || task.assignedTo !== interaction.user.id))) {
+      await interaction.reply({
+        content: '⛔ You can only edit your own tasks (leadership can edit any).',
+        flags: EPHEMERAL_FLAG,
+      });
+      return;
+    }
+    const modal = new ModalBuilder()
+      .setCustomId(`phnxt_modal_edit:${taskId}`)
+      .setTitle('✏️ Edit Task');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('phnxt_f_title')
+          .setLabel('Task Name')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(task.title.slice(0, 100)),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('phnxt_f_desc')
+          .setLabel('Description')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setValue((task.description || '').slice(0, 1024)),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('phnxt_f_due')
+          .setLabel('Due Date (YYYY-MM-DD)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setValue(task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : ''),
+      ),
+    );
+    await interaction.showModal(modal);
+    return;
+  }
+
   if (id.startsWith('phnxt_act_update:')) {
     const taskId = id.slice('phnxt_act_update:'.length);
     const task = await findTask(taskId);
@@ -747,6 +794,57 @@ async function handleTaskButton(interaction) {
     return;
   }
 
+  if (id.startsWith('phnxt_assign_reassign:')) {
+    const taskId = id.slice('phnxt_assign_reassign:'.length);
+    const task = await findTask(taskId);
+    if (!task) {
+      await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
+      return;
+    }
+    const updates = await getUpdates(task.id);
+    const userRow = userPickRow(`phnxt_assign_user:${task.id}`, 'Select the new assignee…');
+    const cancelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('phnxt_assign_cancel')
+        .setStyle(ButtonStyle.Secondary)
+        .setLabel('✖️ Cancel'),
+    );
+    await interaction.update({
+      embeds: [buildDetailEmbed(task, updates)],
+      components: [userRow, cancelRow],
+    });
+    return;
+  }
+
+  if (id.startsWith('phnxt_assign_remove:')) {
+    const taskId = id.slice('phnxt_assign_remove:'.length);
+    if (!isLeadershipUser(interaction.member)) {
+      await interaction.update({ content: '⛔ Only leadership can modify assignments.', embeds: [], components: [] });
+      return;
+    }
+    const task = await findTask(taskId);
+    if (!task) {
+      await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
+      return;
+    }
+    const result = await releaseTask(task, {
+      userId: interaction.user.id,
+      note: 'Assignment removed by leadership.',
+    });
+    if (!result.ok) {
+      await interaction.update({ content: `⚠️ ${result.error}`, embeds: [], components: [] });
+      return;
+    }
+    const embed = {
+      color: 0xf59e0b,
+      title: '🚫 Assignment Removed',
+      description: `**${taskTag(result.task)} ${result.task.title}**\n\nThe task is **Open** again and available to claim or reassign.`,
+    };
+    await interaction.update({ embeds: [embed], components: [] });
+    await updateTasksPanel(interaction.client);
+    return;
+  }
+
   await interaction.reply({ content: 'Unknown task action.', flags: EPHEMERAL_FLAG });
 }
 
@@ -766,7 +864,21 @@ async function handleTaskSelect(interaction) {
   if (id.startsWith('phnxt_show_select')) {
     const { page, filter } = parseBoardParts(id);
     const backId = `phnxt_back_show:p${page}:f${filter}`;
-    return showDetail(interaction, task, backId, null);
+    const canAct =
+      isLeadershipUser(interaction.member) || (task.assignedTo && task.assignedTo === interaction.user.id);
+    const actionRow = canAct
+      ? new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`phnxt_act_edit:${task.id}`)
+            .setStyle(ButtonStyle.Primary)
+            .setLabel('✏️ Edit'),
+          new ButtonBuilder()
+            .setCustomId(`phnxt_act_complete:${task.id}`)
+            .setStyle(ButtonStyle.Success)
+            .setLabel('✅ Mark Complete'),
+        )
+      : null;
+    return showDetail(interaction, task, backId, actionRow);
   }
 
   if (id.startsWith('phnxt_claim_select')) {
@@ -793,29 +905,37 @@ async function handleTaskSelect(interaction) {
       await interaction.update({ content: '⚠️ This task is not assigned to you.', embeds: [], components: [] });
       return;
     }
-    const actionRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`phnxt_act_update:${task.id}`)
-        .setStyle(ButtonStyle.Primary)
-        .setLabel('📝 Update'),
-      new ButtonBuilder()
-        .setCustomId(`phnxt_act_release:${task.id}`)
-        .setStyle(ButtonStyle.Danger)
-        .setLabel('❌ Release'),
-      new ButtonBuilder()
-        .setCustomId(`phnxt_act_complete:${task.id}`)
-        .setStyle(ButtonStyle.Success)
-        .setLabel('✅ Complete'),
-      new ButtonBuilder()
-        .setCustomId(`phnxt_act_delete:${task.id}`)
-        .setStyle(ButtonStyle.Danger)
-        .setLabel('🗑 Delete'),
-      new ButtonBuilder()
-        .setCustomId('phnxt_mine_back')
-        .setStyle(ButtonStyle.Secondary)
-        .setLabel('⬅️ Back'),
-    );
-    return showDetail(interaction, task, null, actionRow);
+    const actionRows = [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`phnxt_act_edit:${task.id}`)
+          .setStyle(ButtonStyle.Primary)
+          .setLabel('✏️ Edit'),
+        new ButtonBuilder()
+          .setCustomId(`phnxt_act_update:${task.id}`)
+          .setStyle(ButtonStyle.Primary)
+          .setLabel('📝 Update'),
+        new ButtonBuilder()
+          .setCustomId(`phnxt_act_release:${task.id}`)
+          .setStyle(ButtonStyle.Danger)
+          .setLabel('❌ Release'),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`phnxt_act_complete:${task.id}`)
+          .setStyle(ButtonStyle.Success)
+          .setLabel('✅ Mark Complete'),
+        new ButtonBuilder()
+          .setCustomId(`phnxt_act_delete:${task.id}`)
+          .setStyle(ButtonStyle.Danger)
+          .setLabel('🗑 Delete'),
+        new ButtonBuilder()
+          .setCustomId('phnxt_mine_back')
+          .setStyle(ButtonStyle.Secondary)
+          .setLabel('⬅️ Back'),
+      ),
+    ];
+    return showDetail(interaction, task, null, actionRows);
   }
 
   if (id.startsWith('phnxt_archive_select')) {
@@ -840,6 +960,29 @@ async function handleTaskSelect(interaction) {
 
   if (id === 'phnxt_assign_task_select') {
     const updates = await getUpdates(task.id);
+
+    if (task.assignedTo) {
+      const actionRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`phnxt_assign_remove:${task.id}`)
+          .setStyle(ButtonStyle.Danger)
+          .setLabel('🚫 Remove Assignment'),
+        new ButtonBuilder()
+          .setCustomId(`phnxt_assign_reassign:${task.id}`)
+          .setStyle(ButtonStyle.Primary)
+          .setLabel('🔁 Reassign'),
+        new ButtonBuilder()
+          .setCustomId('phnxt_assign_cancel')
+          .setStyle(ButtonStyle.Secondary)
+          .setLabel('✖️ Cancel'),
+      );
+      await interaction.update({
+        embeds: [buildDetailEmbed(task, updates)],
+        components: [actionRow],
+      });
+      return;
+    }
+
     const userRow = new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
         .setCustomId(`phnxt_assign_user:${task.id}`)
@@ -964,6 +1107,47 @@ async function handleTaskModal(interaction) {
       ]
         .filter(Boolean)
         .join('\n'),
+    };
+    await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
+    await updateTasksPanel(interaction.client);
+    return;
+  }
+
+  if (id.startsWith('phnxt_modal_edit:')) {
+    const taskId = id.slice('phnxt_modal_edit:'.length);
+    const task = await findTask(taskId);
+    if (!task) {
+      await interaction.reply({ content: '⚠️ This task no longer exists.', flags: EPHEMERAL_FLAG });
+      return;
+    }
+    const title = get('phnxt_f_title');
+    if (!title) {
+      await interaction.reply({ content: '⚠️ Task name is required.', flags: EPHEMERAL_FLAG });
+      return;
+    }
+    const description = get('phnxt_f_desc') || null;
+    const dueRaw = get('phnxt_f_due');
+    let dueDate = task.dueDate;
+    if (dueRaw) {
+      const due = parseDueDate(dueRaw);
+      if (due.error) {
+        await interaction.reply({ content: `⚠️ ${due.error}`, flags: EPHEMERAL_FLAG });
+        return;
+      }
+      dueDate = due.date;
+    } else {
+      dueDate = null;
+    }
+
+    const result = await editTask(task, { userId: interaction.user.id, title, description, dueDate });
+    if (!result.ok) {
+      await interaction.reply({ content: `⚠️ ${result.error}`, flags: EPHEMERAL_FLAG });
+      return;
+    }
+    const embed = {
+      color: 0x3b82f6,
+      title: '✏️ Task Edited',
+      description: `**${taskTag(result.task)} ${result.task.title}**\n\n${description ? description.slice(0, 512) : ''}`.trim(),
     };
     await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
     await updateTasksPanel(interaction.client);
