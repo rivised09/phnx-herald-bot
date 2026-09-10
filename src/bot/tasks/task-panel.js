@@ -14,7 +14,6 @@ const TABLE_PAGE_SIZE = 6;
 const DEFAULT_PANEL_FILTER = 'ACT';
 const PANEL_FILTER_LABELS = {
   ACT: '📋 All Active',
-  ALL: '🧾 Everything',
   OPEN: '🔵 Open',
   INPROG: '🟡 In Progress',
   DONE: '🟢 Done',
@@ -83,7 +82,6 @@ function filterTasks(tasks, filter) {
   if (filter === 'OPEN') return tasks.filter((t) => t.status === 'OPEN');
   if (filter === 'INPROG') return tasks.filter((t) => t.status === 'IN_PROGRESS');
   if (filter === 'DONE') return tasks.filter((t) => t.status === 'COMPLETED');
-  if (filter === 'ALL') return tasks;
   return tasks.filter((t) => t.status === 'OPEN' || t.status === 'IN_PROGRESS' || t.status === 'BLOCKED');
 }
 
@@ -155,7 +153,7 @@ function secondaryRow() {
 }
 
 function filterButtonsRow(activeFilter) {
-  const keys = ['ACT', 'ALL', 'OPEN', 'INPROG', 'DONE'];
+  const keys = ['ACT', 'OPEN', 'INPROG', 'DONE'];
   const row = new ActionRowBuilder();
   for (const key of keys) {
     row.addComponents(
