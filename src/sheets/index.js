@@ -1,47 +1,56 @@
 const crypto = require('crypto');
 const { CONFIG } = require('../config');
 
-const TASKS_HEADERS = [
-  'Task ID',
-  'Task',
-  'Description',
-  'Created By',
-  'Assigned To',
-  'Priority',
-  'Status',
-  'Progress',
-  'Created At',
-  'Claimed At',
-  'Due Date',
-  'Completed At',
-  'Completed By',
-];
+// Layout (source of truth = the spreadsheet):
+//   TASKS:     row1 title, rows 2-4 summary/protected, row5 headers, data from row 6.
+//             Column A (ID) is owner-PROTECTED -> the bot writes only B..F (Task..Due).
+//             The bot generates unique PHW-#### IDs (checked against TASKS+ARCHIVE) and
+//             attempts to write them into column A; if the protection blocks that write,
+//             it falls back to the internal row token R<row> (see createTaskInSheet).
+//   ARCHIVE:   row1 title, row2 headers, data from row 3. Bot may write A..F.
+//   TASK UPDATES: row2 headers, data from row 3 (unchanged).
+//   MEMBERS:   row2 headers, data from row 3. Bot writes A..F; G holds the user's
+//             "Helper for Name" ARRAYFORMULA which the bot must not touch.
 
+const TASKS_HEADERS = ['ID (automated)', 'Task', 'Description', 'Assigned To', 'Status', 'Due'];
+const ARCHIVE_HEADERS = ['ID', 'Task', 'Description', 'Assigned To', 'Status', 'Due'];
 const UPDATES_HEADERS = ['Update ID', 'Task ID', 'Updated By', 'Progress', 'Status', 'Note', 'Timestamp'];
+const MEMBERS_HEADERS = ['Discord ID', 'Username', 'Nickname', 'Display Name', 'Roles', 'Active', 'Helper for Name'];
 
-const MEMBERS_HEADERS = ['Discord ID', 'Username', 'Nickname', 'Display Name', 'Roles', 'Active'];
-
-const SHEETS = [
-  { title: 'TASKS', headers: TASKS_HEADERS },
-  { title: 'TASK UPDATES', headers: UPDATES_HEADERS },
-  { title: 'MEMBERS', headers: MEMBERS_HEADERS },
-];
-
+// A, B, C, D, E, F, G...
 const COL = {
-  TASK_ID: 0,
-  TITLE: 1,
+  ID: 0,
+  TASK: 1,
   DESCRIPTION: 2,
-  CREATED_BY: 3,
-  ASSIGNED_TO: 4,
-  PRIORITY: 5,
-  STATUS: 6,
-  PROGRESS: 7,
-  CREATED_AT: 8,
-  CLAIMED_AT: 9,
-  DUE_DATE: 10,
-  COMPLETED_AT: 11,
-  COMPLETED_BY: 12,
+  ASSIGNED_TO: 3,
+  STATUS: 4,
+  DUE: 5,
 };
+
+const LAYOUT = {
+  TASKS: { headers: TASKS_HEADERS, headerRow: 5, dataStart: 6, skipColA: true },
+  ARCHIVE: { headers: ARCHIVE_HEADERS, headerRow: 2, dataStart: 3, skipColA: false },
+  'TASK UPDATES': { headers: UPDATES_HEADERS, headerRow: 2, dataStart: 3, skipColA: false },
+  MEMBERS: { headers: MEMBERS_HEADERS, headerRow: 2, dataStart: 3, skipColA: false },
+};
+
+const STATUS_LABELS = {
+  OPEN: 'Open',
+  IN_PROGRESS: 'In Progress',
+  BLOCKED: 'Blocked',
+  COMPLETED: 'Completed',
+  CANCELLED: 'Cancelled',
+};
+
+const STATUS_PROGRESS = {
+  OPEN: 0,
+  IN_PROGRESS: 50,
+  BLOCKED: 40,
+  COMPLETED: 100,
+  CANCELLED: 0,
+};
+
+const SHEET_EPOCH = Date.UTC(1899, 11, 30);
 
 let client = null;
 let cachedToken = { access_token: null, expires_at: 0 };
@@ -148,7 +157,9 @@ async function sheetsRequest(path, { method = 'GET', body } = {}) {
 }
 
 async function readValues(sheet, range) {
-  const data = await sheetsRequest(`/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`);
+  const data = await sheetsRequest(
+    `/values/${quoteSheet(sheet)}!${range}?valueRenderOption=UNFORMATTED_VALUE`,
+  );
   return data.values || [];
 }
 
@@ -159,10 +170,6 @@ async function writeValues(sheet, range, values) {
   });
 }
 
-async function clearValues(sheet, range) {
-  await sheetsRequest(`/values/${quoteSheet(sheet)}!${range}:clear`, { method: 'POST', body: {} });
-}
-
 async function appendRow(title, values) {
   const res = await sheetsRequest(
     `/values/${quoteSheet(title)}!A3:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
@@ -171,13 +178,17 @@ async function appendRow(title, values) {
   return res.updates?.updatedRange || '';
 }
 
+async function clearValues(sheet, range) {
+  await sheetsRequest(`/values/${quoteSheet(sheet)}!${range}:clear`, { method: 'POST', body: {} });
+}
+
 async function getSheetId(title) {
   if (sheetIdCache[title]) return sheetIdCache[title];
-  const data = await sheetsRequest('/?fields=sheets(sheetId,properties(title))');
+  const data = await sheetsRequest('/?fields=sheets(properties(sheetId,title))');
   for (const s of data.sheets || []) {
     if (String(s.properties?.title) === title) {
-      sheetIdCache[title] = s.sheetId;
-      return s.sheetId;
+      sheetIdCache[title] = s.properties.sheetId;
+      return s.properties.sheetId;
     }
   }
   throw new Error(`Sheet "${title}" not found`);
@@ -199,111 +210,86 @@ async function deleteDimensionRow(title, rowIndex1Based) {
   });
 }
 
-async function migrateLegacyLayout() {
-  if (!isConfigured()) return;
-  for (const { title, headers } of SHEETS) {
-    const a1 = await readValues(title, 'A1:A1');
-    if (a1.length === 0 || a1[0][0] !== headers[0]) continue;
-
-    const endCol = String.fromCharCode(64 + headers.length);
-    const old = await readValues(title, `A2:${endCol}1000`);
-    const data = old.filter((r) => r.some((c) => c !== '' && c != null));
-
-    await clearValues(title, `A1:${endCol}1000`);
-    await writeValues(title, `A2:${endCol}2`, [headers]);
-    if (data.length > 0) {
-      await writeValues(title, `A3:${endCol}${2 + data.length}`, data);
-    }
-  }
+async function clearTaskRow(rowIndex1Based) {
+  await writeValues('TASKS', `B${rowIndex1Based}:F${rowIndex1Based}`, [['', '', '', '', '']]);
 }
 
 async function ensureHeaders() {
   if (!isConfigured()) return;
-  for (const { title, headers } of SHEETS) {
-    const existing = await readValues(title, 'A2:A2');
+  for (const [title, layout] of Object.entries(LAYOUT)) {
+    const firstCol = layout.skipColA ? COL.TASK : COL.ID;
+    const endCol = String.fromCharCode(64 + layout.headers.length);
+    const existing = await readValues(title, `${String.fromCharCode(65 + firstCol)}${layout.headerRow}:${String.fromCharCode(65 + firstCol)}${layout.headerRow}`);
     if (existing.length > 0 && existing[0]?.[0]) continue;
-    const cols = String.fromCharCode(64 + headers.length);
-    await writeValues(title, `A2:${cols}2`, [headers]);
+    const startCol = String.fromCharCode(65 + firstCol);
+    await writeValues(title, `${startCol}${layout.headerRow}:${endCol}${layout.headerRow}`, [
+      layout.headers.slice(firstCol),
+    ]);
   }
 }
 
-// ---------- formatting helpers ----------
+// ---------- date helpers (Google Sheets stores dates as serial numbers) ----------
 
-function fmtDate(d) {
-  return d ? new Date(d).toISOString().slice(0, 10) : '';
+function toSerial(date) {
+  if (!date) return '';
+  return Math.floor((new Date(date).getTime() - SHEET_EPOCH) / 86400000);
+}
+
+function parseDateCell(value) {
+  const v = String(value || '').trim();
+  if (!v) return null;
+  if (/^-?\d+$/.test(v) || /^-?\d+\.\d+$/.test(v)) {
+    const n = parseFloat(v);
+    const d = new Date(SHEET_EPOCH + n * 86400000);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+// ---------- cell formatting / parsing ----------
+
+function statusLabel(status) {
+  return STATUS_LABELS[status] || 'Open';
+}
+
+function parseSheetStatus(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (['open', 'todo'].includes(v)) return 'OPEN';
+  if (['in progress', 'inprogress', 'active', 'progress'].includes(v)) return 'IN_PROGRESS';
+  if (['blocked', 'on hold', 'stuck'].includes(v)) return 'BLOCKED';
+  if (['completed', 'done', 'finished'].includes(v)) return 'COMPLETED';
+  if (['cancelled', 'canceled', 'cancelled'].includes(v)) return 'CANCELLED';
+  return null;
+}
+
+function progressForStatus(status) {
+  return STATUS_PROGRESS[status] ?? 0;
 }
 
 function fmtDateTime(d) {
   return d ? `${new Date(d).toISOString().slice(0, 19).replace('T', ' ')} UTC` : '';
 }
 
-function taskTag(task) {
-  return `T-${String(task.taskNumber).padStart(3, '0')}`;
-}
-
-function statusLabel(status) {
-  return status === 'COMPLETED' ? 'Completed' : status === 'IN_PROGRESS' ? 'In Progress' : 'Open';
-}
-
-function priorityLabel(priority) {
-  return (priority || 'NORMAL').charAt(0) + (priority || 'NORMAL').slice(1).toLowerCase();
+function helperName(id) {
+  if (!id) return '';
+  const guild = getGuild();
+  const member = guild?.members?.cache?.get(id);
+  if (member) return member.nickname || member.user.displayName || member.user.username;
+  return id;
 }
 
 function resolveUser(id) {
   if (!id) return '';
-  const guild = client?.guilds?.cache?.get(CONFIG.DISCORD.GUILD_ID);
+  const guild = getGuild();
   const member = guild?.members?.cache?.get(id);
-  if (member) return `@${member.nickname || member.user.username}`;
+  if (member) return `@${member.nickname || member.user.displayName || member.user.username}`;
   return id;
 }
 
 function resolveMentions(text) {
   return String(text || '').replace(/<@!?(\d+)>/g, (m, id) => resolveUser(id) || m);
-}
-
-// ---------- cell parsing helpers ----------
-
-function parseSheetStatus(value) {
-  const v = String(value || '').trim().toLowerCase();
-  if (['open', 'todo'].includes(v)) return 'OPEN';
-  if (['in progress', 'inprogress', 'active', 'progress'].includes(v)) return 'IN_PROGRESS';
-  if (['completed', 'done', 'finished'].includes(v)) return 'COMPLETED';
-  return null;
-}
-
-function parseSheetPriority(value) {
-  const v = String(value || '').trim().toLowerCase();
-  const map = { low: 'LOW', normal: 'NORMAL', high: 'HIGH', max: 'HIGH', critical: 'HIGH' };
-  return map[v] || null;
-}
-
-function parseSheetProgress(value) {
-  const n = parseInt(String(value || '').replace(/[^0-9]/g, ''), 10);
-  if (Number.isNaN(n) || n < 0 || n > 100) return null;
-  return n;
-}
-
-function parseSheetDate(value) {
-  const v = String(value || '').trim();
-  if (!v) return null;
-  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const d = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`) : new Date(v);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString();
-}
-
-function parseTimestamp(value) {
-  const s = String(value || '').trim();
-  if (!s) return null;
-  const d = new Date(s.replace(' UTC', 'Z').replace(' ', 'T'));
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function parseDateCell(value) {
-  const s = String(value || '').trim();
-  if (!s) return null;
-  const d = new Date(`${s}T00:00:00Z`);
-  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function resolveSheetUser(guild, value) {
@@ -312,139 +298,240 @@ function resolveSheetUser(guild, value) {
   if (/^\d{15,}$/.test(v)) return v;
   const target = v.toLowerCase();
   const found = [...(guild?.members?.cache?.values() || [])].find(
-    (m) => (m.nickname || m.user.username || '').toLowerCase() === target,
+    (m) => {
+      const names = [
+        m.nickname,
+        m.user.displayName,
+        m.user.username,
+        `${m.nickname || ''}${m.user.username}`,
+      ]
+        .filter(Boolean)
+        .map((n) => String(n).toLowerCase());
+      return names.includes(target);
+    },
   );
   return found ? found.id : null;
 }
 
-// ---------- task row mapping ----------
+// ---------- row -> task mapping ----------
 
-function taskFromRow(row, guild) {
-  const tag = String(row[COL.TASK_ID] || '').trim();
-  const num = parseInt(tag.slice(2), 10);
-  const labelToId = (label) => {
-    const id = resolveSheetUser(guild, label);
-    return id || null;
-  };
+function taskFromRow(row, guild, rowIndex) {
+  const rawId = String(row[COL.ID] || '').trim();
+  const labelToId = (label) => resolveSheetUser(guild, label) || null;
   return {
-    id: tag,
-    taskNumber: Number.isNaN(num) ? 0 : num,
-    title: String(row[COL.TITLE] || '').trim(),
+    id: rawId || (String(row[COL.TASK] || '').trim() ? `R${rowIndex}` : ''),
+    rawId,
+    row: rowIndex,
+    title: String(row[COL.TASK] || '').trim(),
     description: String(row[COL.DESCRIPTION] || '') || null,
-    createdBy: labelToId(row[COL.CREATED_BY]),
     assignedTo: labelToId(row[COL.ASSIGNED_TO]),
-    priority: parseSheetPriority(row[COL.PRIORITY]) || 'NORMAL',
     status: parseSheetStatus(row[COL.STATUS]) || 'OPEN',
-    progress: parseSheetProgress(row[COL.PROGRESS]) ?? 0,
-    createdAt: parseTimestamp(row[COL.CREATED_AT]),
-    claimedAt: parseTimestamp(row[COL.CLAIMED_AT]),
-    dueDate: parseDateCell(row[COL.DUE_DATE]),
-    completedAt: parseTimestamp(row[COL.COMPLETED_AT]),
-    completedBy: labelToId(row[COL.COMPLETED_BY]),
+    dueDate: parseDateCell(row[COL.DUE]),
+    completedAt: null,
   };
 }
 
-async function findTagRow(title, tag) {
-  const a = await readValues(title, 'A3:A1000');
-  const idx = a.findIndex((r) => String(r[0] || '').trim() === tag);
-  return idx === -1 ? null : idx + 3;
+async function findTagRow(title, idToken) {
+  const layout = LAYOUT[title];
+  const a = await readValues(title, `A${layout.dataStart}:A1000`);
+  let idx = a.findIndex((r) => String(r[0] || '').trim() === idToken);
+  if (idx === -1 && /^R(\d+)$/.test(idToken)) {
+    const row = Number(idToken.slice(1));
+    if (row >= layout.dataStart) return row;
+  }
+  return idx === -1 ? null : idx + layout.dataStart;
 }
 
 // ---------- task store API ----------
 
-async function listTasks(guild) {
+async function listRows(title, guild) {
   if (!isConfigured()) throw new Error('Google Sheets is not configured.');
-  const rows = await readValues('TASKS', 'A3:M1000');
-  return rows
-    .map((row) => taskFromRow(row, guild))
-    .filter((t) => /^T-\d+$/.test(t.id));
-}
-
-async function nextTaskNumber() {
-  const a = await readValues('TASKS', 'A3:A1000');
-  let max = 0;
-  for (const r of a) {
-    const m = String(r[0] || '').trim().match(/^T-(\d+)$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
+  const layout = LAYOUT[title];
+  const rows = await readValues(title, `A${layout.dataStart}:F1000`);
+  const list = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const t = taskFromRow(row, guild, i + layout.dataStart);
+    if (!t.title && !t.rawId) continue;
+    list.push(t);
   }
-  return max + 1;
+  return list;
 }
 
-async function createTaskInSheet({ title, description, createdBy, assignedTo, priority, dueDate }) {
+async function listTasks(guild) {
+  return listRows('TASKS', guild);
+}
+
+async function listArchiveTasks(guild) {
+  return listRows('ARCHIVE', guild);
+}
+
+function nextIdBase(rows) {
+  let max = 0;
+  let prefix = 'PHW-';
+  const seen = new Set();
+  for (const r of rows) {
+    const id = String(r[COL.ID] || '').trim();
+    const m = id.match(/(.*?)(\d{1,5})$/);
+    if (!m || !id) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const num = parseInt(m[2], 10);
+    if (num > max) {
+      max = num;
+      prefix = m[1] || 'PHW-';
+    }
+  }
+  return { prefix, max };
+}
+
+async function nextTaskId() {
+  const [tasks, archive] = await Promise.all([
+    readValues('TASKS', 'A6:A1000'),
+    readValues('ARCHIVE', 'A3:A1000'),
+  ]);
+  let { prefix, max } = nextIdBase(tasks);
+  const arch = nextIdBase(archive);
+  if (arch.max > max) {
+    max = arch.max;
+    prefix = arch.prefix || prefix;
+  }
+  return `${prefix}${String(max + 1).padStart(4, '0')}`;
+}
+
+async function createTaskInSheet({ title, description, assignedTo, dueDate }) {
   return withWriteLock(async () => {
-    const number = await nextTaskNumber();
-    const tag = `T-${String(number).padStart(3, '0')}`;
-    const now = new Date();
+    if (!title || !String(title).trim()) throw new Error('Task name is required.');
+    const t = String(title).trim();
     const status = assignedTo ? 'IN_PROGRESS' : 'OPEN';
     const values = [
-      tag,
-      title,
+      t,
       description || '',
-      resolveUser(createdBy),
-      resolveUser(assignedTo),
-      priorityLabel(priority),
+      assignedTo ? helperName(assignedTo) : '',
       statusLabel(status),
-      '0',
-      fmtDateTime(now),
-      assignedTo ? fmtDateTime(now) : '',
-      fmtDate(dueDate),
-      '',
-      assignedTo ? resolveUser(assignedTo) : '',
+      toSerial(dueDate),
     ];
-    await appendRow('TASKS', values);
-    await appendUpdateRaw(tag, {
-      userId: createdBy || 'system',
-      progress: 0,
+
+    const rows = await readValues('TASKS', 'B6:B1000');
+    let rowIndex = rows.findIndex((r) => !String(r[0] || '').trim());
+    if (rowIndex === -1) {
+      rowIndex = rows.length; // after the last row (B column still empty there)
+    }
+    const writeRow = 6 + rowIndex;
+    await writeValues('TASKS', `B${writeRow}:F${writeRow}`, [values]);
+
+    // Generate a unique PHW-#### ID (checked against BOTH TASKS and ARCHIVE) and write it
+    // into column A. Column A is owner-protected, so if the service account is not an
+    // allowed editor of that range the write fails with a 400; we then fall back to the
+    // internal row token R<row> so the task still works end to end.
+    let id = await nextTaskId();
+    let idFallback = false;
+    try {
+      await writeValues('TASKS', `A${writeRow}:A${writeRow}`, [[id]]);
+    } catch (err) {
+      if (!/protected|forbidden|permission/i.test(err.message)) throw err;
+      idFallback = true;
+      id = `R${writeRow}`;
+      console.warn(
+        `[SHEETS] Could not write the generated ID (${id}) into TASKS column A — column A is protected and the service account is not an allowed editor of that range. Falling back to internal id ${id}. Add the service account email to the protected range's allowed editors to store PHW-#### IDs.`,
+      );
+    }
+
+    const idRow = await readValues('TASKS', `A${writeRow}:F${writeRow}`);
+    const task = taskFromRow(idRow[0] || [], getGuild(), writeRow);
+    task.status = status;
+    if (idFallback) {
+      task.id = `R${writeRow}`;
+      task.rawId = '';
+    }
+
+    await appendUpdateRaw(task.id, {
+      userId: 'system',
       status,
       note: assignedTo ? `Task created, assigned to <@${assignedTo}>.` : 'Task created, available to claim.',
     });
-    return taskFromRow(values);
+    return task;
   });
 }
 
-async function updateTaskInSheet(tag, patch) {
+async function updateTaskInSheet(idToken, patch) {
   return withWriteLock(async () => {
-    const idx = await findTagRow('TASKS', tag);
-    if (!idx) return null;
-    const current = await readValues('TASKS', `A${idx}:M${idx}`);
-    const row = current[0] || new Array(TASKS_HEADERS.length).fill('');
+    const row = await findTagRow('TASKS', idToken);
+    if (!row) return null;
+    const current = await readValues('TASKS', `A${row}:F${row}`);
+    const raw = current[0] || [];
+    const cell = (i, v) => (v === undefined ? raw[i] : v);
 
-    const apply = (i, v) => {
-      if (v !== undefined) row[i] = v;
-    };
-    apply(COL.TITLE, patch.title);
-    apply(COL.DESCRIPTION, patch.description === undefined ? undefined : patch.description || '');
-    apply(COL.CREATED_BY, patch.createdBy === undefined ? undefined : resolveUser(patch.createdBy));
-    apply(COL.ASSIGNED_TO, patch.assignedTo === undefined ? undefined : patch.assignedTo ? resolveUser(patch.assignedTo) : '');
-    apply(COL.PRIORITY, patch.priority === undefined ? undefined : priorityLabel(patch.priority));
-    apply(COL.STATUS, patch.status === undefined ? undefined : statusLabel(patch.status));
-    apply(COL.PROGRESS, patch.progress === undefined ? undefined : String(patch.progress));
-    apply(COL.CREATED_AT, patch.createdAt === undefined ? undefined : fmtDateTime(patch.createdAt));
-    apply(COL.CLAIMED_AT, patch.claimedAt === undefined ? undefined : fmtDateTime(patch.claimedAt));
-    apply(COL.DUE_DATE, patch.dueDate === undefined ? undefined : fmtDate(patch.dueDate));
-    apply(COL.COMPLETED_AT, patch.completedAt === undefined ? undefined : fmtDateTime(patch.completedAt));
-    apply(COL.COMPLETED_BY, patch.completedBy === undefined ? undefined : patch.completedBy ? resolveUser(patch.completedBy) : '');
+    const values = [
+      raw[COL.ID],
+      String(cell(COL.TASK, patch.title) || ''),
+      String(cell(COL.DESCRIPTION, patch.description) || ''),
+      patch.assignedTo === undefined
+        ? raw[COL.ASSIGNED_TO] || ''
+        : patch.assignedTo
+          ? helperName(patch.assignedTo)
+          : '',
+      patch.status === undefined ? raw[COL.STATUS] || 'Open' : statusLabel(patch.status),
+      cell(COL.DUE, patch.dueDate === undefined ? undefined : toSerial(patch.dueDate)),
+    ];
 
-    await writeValues('TASKS', `A${idx}:M${idx}`, [row]);
-    return taskFromRow(row);
+    await writeValues('TASKS', `B${row}:F${row}`, [values.slice(1)]);
+    return taskFromRow([values[0], ...values.slice(1)], getGuild(), row);
   });
 }
 
-async function deleteTaskRow(tag) {
+async function deleteTaskRow(idToken) {
   return withWriteLock(async () => {
-    const idx = await findTagRow('TASKS', tag);
-    if (!idx) return false;
-    await deleteDimensionRow('TASKS', idx);
+    const row = await findTagRow('TASKS', idToken);
+    if (!row) return false;
+    // Column A is protected: rows cannot be deleted from TASKS. Clear the row contents
+    // instead — the board treats blank rows as no task.
+    await clearTaskRow(row);
     return true;
   });
 }
 
-async function appendUpdateRaw(tag, { userId, progress, status, note }) {
+async function archiveTask(idToken) {
+  return withWriteLock(async () => {
+    const row = await findTagRow('TASKS', idToken);
+    if (!row) return null;
+
+    const current = await readValues('TASKS', `A${row}:F${row}`);
+    const data = current[0] || [];
+    const oldId = String(data[COL.ID] || '').trim();
+    const id = oldId || (await nextTaskId());
+
+    const archive = await readValues('ARCHIVE', 'A3:A1000');
+    let archRow = archive.findIndex((r) => !String(r[0] || '').trim());
+    if (archRow === -1) return null;
+    const target = 3 + archRow;
+
+    await writeValues('ARCHIVE', `A${target}:F${target}`, [
+      [
+        id,
+        String(data[COL.TASK] || ''),
+        String(data[COL.DESCRIPTION] || ''),
+        String(data[COL.ASSIGNED_TO] || ''),
+        statusLabel('COMPLETED'),
+        data[COL.DUE],
+      ],
+    ]);
+    await clearTaskRow(row);
+
+    const archived = taskFromRow([id, ...data.slice(1)], getGuild(), target);
+    archived.id = id;
+    archived.status = 'COMPLETED';
+    archived.completedAt = new Date();
+    return archived;
+  });
+}
+
+async function appendUpdateRaw(idToken, { userId, status, note }) {
   const res = await appendRow('TASK UPDATES', [
     '',
-    tag,
+    idToken,
     resolveUser(userId),
-    String(progress),
+    String(progressForStatus(status)),
     statusLabel(status),
     resolveMentions(note),
     fmtDateTime(new Date()),
@@ -457,25 +544,27 @@ async function appendUpdateRaw(tag, { userId, progress, status, note }) {
   return res;
 }
 
-async function appendTaskUpdate(tag, data) {
-  return withWriteLock(() => appendUpdateRaw(tag, data));
+async function appendTaskUpdate(idToken, data) {
+  return withWriteLock(() => appendUpdateRaw(idToken, data));
 }
 
-async function getTaskUpdates(tag, guild) {
+async function getTaskUpdates(idToken, guild) {
   const rows = await readValues('TASK UPDATES', 'A3:G1000');
-  const labelToId = (label) => {
-    const id = resolveSheetUser(guild, label);
-    return id || null;
-  };
+  const labelToId = (label) => resolveSheetUser(guild, label) || null;
   return rows
-    .filter((r) => String(r[1] || '').trim() === tag)
+    .filter((r) => String(r[1] || '').trim() === idToken)
     .map((r) => ({
       id: String(r[0] || '').trim(),
       userId: labelToId(r[2]),
-      progress: parseSheetProgress(r[3]) ?? 0,
-      status: parseSheetStatus(r[4]) || tag,
+      progress: Number.parseInt(String(r[3] || '').replace(/[^0-9]/g, ''), 10) || 0,
+      status: parseSheetStatus(r[4]) || 'OPEN',
       note: String(r[5] || '') || null,
-      createdAt: parseTimestamp(r[6]),
+      createdAt: (() => {
+        const s = String(r[6] || '').trim();
+        if (!s) return null;
+        const d = new Date(s.replace(' UTC', 'Z').replace(' ', 'T'));
+        return Number.isNaN(d.getTime()) ? null : d;
+      })(),
     }));
 }
 
@@ -497,13 +586,13 @@ async function syncMembers(guild) {
         m.id,
         m.user.username,
         m.nickname || '',
-        m.nickname || m.user.username,
+        m.nickname || m.user.displayName || m.user.username,
         roles,
         'Yes',
       ];
     });
 
-  await writeValues('MEMBERS', 'A2:F2', [MEMBERS_HEADERS]);
+  await writeValues('MEMBERS', 'A2:F2', [MEMBERS_HEADERS.slice(0, 6)]);
   if (rows.length === 0) return;
   await clearValues('MEMBERS', 'A3:F1000');
   await writeValues('MEMBERS', `A3:F${2 + rows.length}`, rows);
@@ -514,12 +603,12 @@ module.exports = {
   getGuild,
   isConfigured,
   ensureHeaders,
-  migrateLegacyLayout,
   listTasks,
-  nextTaskNumber,
+  listArchiveTasks,
   createTaskInSheet,
   updateTaskInSheet,
   deleteTaskRow,
+  archiveTask,
   getTaskUpdates,
   appendTaskUpdate,
   syncMembers,

@@ -6,7 +6,7 @@ const {
 } = require('discord.js');
 const prisma = require('../../db');
 const { CONFIG } = require('../../config');
-const { statusCounts, sheetTasks } = require('./task-actions');
+const { statusCounts, sheetTasks, archiveTasks } = require('./task-actions');
 
 const EPHEMERAL_FLAG = 64;
 const TABLE_PAGE_SIZE = 6;
@@ -25,8 +25,10 @@ function settingKey(guildId) {
 }
 
 async function getPanelCounts() {
-  const tasks = await sheetTasks();
-  return statusCounts(tasks);
+  const [tasks, archived] = await Promise.all([sheetTasks(), archiveTasks()]);
+  const counts = statusCounts(tasks);
+  const done = statusCounts(archived).completed;
+  return { ...counts, completed: done };
 }
 
 function buildPanelEmbed(counts) {
@@ -36,7 +38,8 @@ function buildPanelEmbed(counts) {
       '## 🐦‍🔥 Phoenix of War 973\n\n'
         + `\`📋 Active Tasks: ${counts.active}\`\n`
         + `\`🟡 In Progress: ${counts.inProgress}\`\n`
-        + `\`🔵 Open: ${counts.open}\``,
+        + `\`🔵 Open: ${counts.open}\`\n`
+        + `\`🔴 Blocked: ${counts.blocked}\``,
     );
 
   return embed;
@@ -44,7 +47,7 @@ function buildPanelEmbed(counts) {
 
 const TASK_W = 16;
 const ASSIGN_W = 11;
-const PROG_W = 7;
+const DUE_W = 10;
 const STATUS_W = 9;
 
 function padCell(text, width) {
@@ -63,16 +66,17 @@ function displayMember(guild, id) {
 function displayNameColumn(guild, t) {
   const title = padCell(t.title, TASK_W);
   const assignee = padCell(t.assignedTo ? displayMember(guild, t.assignedTo) : '—', ASSIGN_W);
-  const status = t.status === 'COMPLETED' ? '🟢 Done' : t.status === 'IN_PROGRESS' ? '🟡 Active' : '🔵 Open';
-  return `${title}│${assignee}│${padCell(`${t.progress}%`, PROG_W)}│${status}`;
+  const due = padCell(t.dueDate ? new Date(t.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—', DUE_W);
+  const status = t.status === 'COMPLETED' ? '🟢 Done' : t.status === 'IN_PROGRESS' ? '🟡 Active' : t.status === 'BLOCKED' ? '🔴 Blocked' : '🔵 Open';
+  return `${title}│${assignee}│${due}│${status}`;
 }
 
 function tableHeader() {
-  return `${padCell('TASK', TASK_W)}│${padCell('ASSIGNED', ASSIGN_W)}│${padCell('PROGRESS', PROG_W)}│${padCell('STATUS', STATUS_W)}`;
+  return `${padCell('TASK', TASK_W)}│${padCell('ASSIGNED', ASSIGN_W)}│${padCell('DUE', DUE_W)}│${padCell('STATUS', STATUS_W)}`;
 }
 
 function tableSeparator() {
-  return `${'─'.repeat(TASK_W)}┼${'─'.repeat(ASSIGN_W)}┼${'─'.repeat(PROG_W)}┼${'─'.repeat(STATUS_W)}`;
+  return `${'─'.repeat(TASK_W)}┼${'─'.repeat(ASSIGN_W)}┼${'─'.repeat(DUE_W)}┼${'─'.repeat(STATUS_W)}`;
 }
 
 function filterTasks(tasks, filter) {
@@ -80,7 +84,7 @@ function filterTasks(tasks, filter) {
   if (filter === 'INPROG') return tasks.filter((t) => t.status === 'IN_PROGRESS');
   if (filter === 'DONE') return tasks.filter((t) => t.status === 'COMPLETED');
   if (filter === 'ALL') return tasks;
-  return tasks.filter((t) => t.status === 'OPEN' || t.status === 'IN_PROGRESS');
+  return tasks.filter((t) => t.status === 'OPEN' || t.status === 'IN_PROGRESS' || t.status === 'BLOCKED');
 }
 
 function buildTaskTableEmbed(guild, tasks, page, filter) {

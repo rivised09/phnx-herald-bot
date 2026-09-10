@@ -13,12 +13,12 @@ const { isLeadershipUser } = require('../../utils/role-check');
 const {
   TASK_STATUS,
   TASK_STATUS_LABELS,
-  TASK_PRIORITY_LABELS,
-  normalizePriority,
+  UPDATE_STATUSES,
   normalizeStatus,
   taskTag,
   statusCounts,
   sheetTasks,
+  archiveTasks,
   findTask,
   createTask,
   claimTask,
@@ -35,6 +35,8 @@ const EPHEMERAL_FLAG = 64;
 const PAGE_SIZE = 10;
 const FILTERS = { A: 'ALL', O: 'OPEN', I: 'IN_PROGRESS' };
 const FILTER_REVERSE = { ALL: 'A', OPEN: 'O', IN_PROGRESS: 'I' };
+
+const STATUS_PROGRESS = { OPEN: 0, IN_PROGRESS: 50, BLOCKED: 40, COMPLETED: 100, CANCELLED: 0 };
 
 const BOARD_CONFIG = {
   show: { title: '📋 Active Tasks', selectPrefix: 'phnxt_show_select', placeholder: 'Open a task…', filterable: true },
@@ -89,20 +91,23 @@ function parseDueDate(raw) {
 }
 
 async function taskCountsEmbed() {
-  const tasks = await sheetTasks();
+  const [tasks, archived] = await Promise.all([sheetTasks(), archiveTasks()]);
   const counts = statusCounts(tasks);
-  return `📋 **Active Tasks:** ${counts.active}  ·  🟡 **In Progress:** ${counts.inProgress}  ·  🔵 **Open:** ${counts.open}  ·  ✅ **Done:** ${counts.completed}`;
+  const done = statusCounts(archived).completed;
+  return `📋 **Active Tasks:** ${counts.active}  ·  🟡 **In Progress:** ${counts.inProgress}  ·  🔵 **Open:** ${counts.open}  ·  🔴 **Blocked:** ${counts.blocked}  ·  ✅ **Done:** ${done}`;
 }
 
 async function queryBoard(flow, filter, userId) {
+  if (flow === 'archive') return archiveTasks();
   const tasks = await sheetTasks();
   if (flow === 'show') {
     if (filter && filter !== 'A') return tasks.filter((t) => t.status === filter);
-    return tasks.filter((t) => t.status === TASK_STATUS.OPEN || t.status === TASK_STATUS.IN_PROGRESS);
+    return tasks.filter((t) => t.status === TASK_STATUS.OPEN || t.status === TASK_STATUS.IN_PROGRESS || t.status === TASK_STATUS.BLOCKED);
   }
   if (flow === 'claim') return tasks.filter((t) => t.status === TASK_STATUS.OPEN && !t.assignedTo);
-  if (flow === 'mine') return tasks.filter((t) => t.assignedTo === userId && t.status !== TASK_STATUS.COMPLETED);
-  return tasks.filter((t) => t.status === TASK_STATUS.COMPLETED);
+  return tasks.filter(
+    (t) => t.assignedTo === userId && t.status !== TASK_STATUS.COMPLETED && t.status !== TASK_STATUS.CANCELLED,
+  );
 }
 
 function renderBoard({ flow, tasks, page, filter }) {
@@ -121,11 +126,11 @@ function renderBoard({ flow, tasks, page, filter }) {
   } else {
     for (const t of slice) {
       if (flow === 'claim') {
-        lines.push(`${taskTag(t)} **${t.title}** — ${TASK_PRIORITY_LABELS[t.priority] || t.priority}`);
+        lines.push(`${taskTag(t)} **${t.title}** — Due ${shortDate(t.dueDate)}`);
       } else {
         lines.push(
-          `${taskTag(t)} **${t.title}** — ${t.assignedTo ? `<@${t.assignedTo}>` : '—'} · ${t.progress}% ${
-            t.status === 'IN_PROGRESS' ? '🟡' : t.status === 'OPEN' ? '🔵' : '✅'
+          `${taskTag(t)} **${t.title}** — ${t.assignedTo ? `<@${t.assignedTo}>` : '—'} ${
+            TASK_STATUS_LABELS[t.status] ? TASK_STATUS_LABELS[t.status].split(' ')[0] : '🔵'
           }`,
         );
       }
@@ -140,19 +145,14 @@ function renderBoard({ flow, tasks, page, filter }) {
 
   const components = [];
 
-  const options = slice.slice(0, 25).map((t) => {
-    const description =
+  const options = slice.slice(0, 25).map((t) => ({
+    label: `${taskTag(t)} ${t.title}`.slice(0, 100),
+    description:
       flow === 'claim'
-        ? `${TASK_PRIORITY_LABELS[t.priority] || t.priority} priority`
-        : flow === 'archive'
-          ? `Completed ${shortDate(t.completedAt)}`
-          : `${TASK_STATUS_LABELS[t.status]} · ${t.progress}%`;
-    return {
-      label: `${taskTag(t)} ${t.title}`.slice(0, 100),
-      description: description.slice(0, 100),
-      value: t.id,
-    };
-  });
+        ? `Due ${shortDate(t.dueDate)}`.slice(0, 100)
+        : `${TASK_STATUS_LABELS[t.status]} · ${t.dueDate ? `Due ${shortDate(t.dueDate)}` : 'No due date'}`.slice(0, 100),
+    value: t.id,
+  }));
 
   const selectRow = new ActionRowBuilder();
   if (options.length > 0) {
@@ -225,7 +225,7 @@ async function rerenderBoard(interaction, flow, page, filter) {
 
 function buildDetailEmbed(task, updates) {
   const color =
-    task.status === 'COMPLETED' ? 0x22c55e : task.status === 'IN_PROGRESS' ? 0xf59e0b : 0x3b82f6;
+    task.status === 'COMPLETED' ? 0x22c55e : task.status === 'BLOCKED' ? 0xef4444 : task.status === 'IN_PROGRESS' ? 0xf59e0b : 0x3b82f6;
   const embed = {
     color,
     title: `📋 ${taskTag(task)} ${task.title}`,
@@ -239,29 +239,22 @@ function buildDetailEmbed(task, updates) {
   embed.fields.push({
     name: 'Details',
     value: [
-      `📌 **Priority:** ${TASK_PRIORITY_LABELS[task.priority] || task.priority}`,
-      `📊 **Status:** ${TASK_STATUS_LABELS[task.status]}`,
-      `👤 **Assigned:** ${task.assignedTo ? `<@${task.assignedTo}>` : 'Nobody'}`,
-      `🛠️ **Created by:** ${task.createdBy ? `<@${task.createdBy}>` : '—'} · ${shortDate(task.createdAt)}`,
-      `📅 **Due:** ${shortDate(task.dueDate)}`,
-    ].join('\n'),
+      `${TASK_STATUS_LABELS[task.status] || task.status}`,
+      `👤 ${task.assignedTo ? `<@${task.assignedTo}>` : 'Nobody'}`,
+      `📅 ${shortDate(task.dueDate)}`,
+    ].join(' · '),
   });
 
-  embed.fields.push({
-    name: 'Progress',
-    value: `${progressBar(task.progress)} ${task.progress}%`,
-  });
-
-  if (updates.length > 0) {
-    const history = updates
-      .slice(0, 6)
-      .map((u) => {
-        const by = u.userId ? `<@${u.userId}>` : 'system';
-        const note = u.note ? `\n> ${u.note.slice(0, 200)}` : '';
-        return `**${shortDate(u.createdAt)}** — ${u.progress}% (${by})${note}`;
-      })
-      .join('\n');
-    embed.fields.push({ name: '📜 Progress History', value: history.slice(0, 1024) });
+  const history = updates
+    .filter((u) => u.createdAt && (u.note || u.status))
+    .slice(0, 4)
+    .map((u) => {
+      const by = u.userId ? `<@${u.userId}>` : 'system';
+      return `**${shortDate(u.createdAt)}** — ${u.note || TASK_STATUS_LABELS[u.status] || ''} (${by})`;
+    })
+    .join('\n');
+  if (history) {
+    embed.fields.push({ name: 'History', value: history.slice(0, 1024) });
   }
 
   return embed;
@@ -282,7 +275,7 @@ async function showDetail(interaction, task, backCustomId, actionRow) {
 
 async function openAssigneeFlow(interaction) {
   const tasks = (await sheetTasks()).filter(
-    (t) => t.status === TASK_STATUS.OPEN || t.status === TASK_STATUS.IN_PROGRESS,
+    (t) => t.status === TASK_STATUS.OPEN || t.status === TASK_STATUS.IN_PROGRESS || t.status === TASK_STATUS.BLOCKED,
   );
 
   if (tasks.length === 0) {
@@ -300,7 +293,7 @@ async function openAssigneeFlow(interaction) {
     .addOptions(
       tasks.slice(0, 25).map((t) => ({
         label: `${taskTag(t)} ${t.title}`.slice(0, 100),
-        description: `${TASK_STATUS_LABELS[t.status]} · ${t.progress}%`.slice(0, 100),
+        description: `${TASK_STATUS_LABELS[t.status]} · ${t.dueDate ? `Due ${shortDate(t.dueDate)}` : 'No due date'}`.slice(0, 100),
         value: t.id,
       })),
     );
@@ -335,8 +328,8 @@ async function applyAssignment(interaction, taskId) {
     await interaction.update({ content: '⚠️ That task no longer exists.', embeds: [], components: [] });
     return;
   }
-  if (task.status === TASK_STATUS.COMPLETED) {
-    await interaction.update({ content: '⚠️ A completed task cannot be reassigned.', embeds: [], components: [] });
+  if (task.status === TASK_STATUS.COMPLETED || task.status === TASK_STATUS.CANCELLED) {
+    await interaction.update({ content: '⚠️ A completed or cancelled task cannot be reassigned.', embeds: [], components: [] });
     return;
   }
 
@@ -374,7 +367,7 @@ async function handleTaskButton(interaction) {
         '**➕ New Task** — Leadership creates a task; unassigned tasks enter the claim pool.',
         '**📋 Show Tasks** — Browse the active task board.',
         '**🙋 Claim Task** — See tasks available to claim and take one.',
-        '**📌 My Tasks** — Your assignments; update progress, release, or complete.',
+        '**📌 My Tasks** — Your assignments; update status, release, or complete.',
         '**📚 Archive** — Completed tasks and their history.',
       ].join('\n'),
     };
@@ -457,7 +450,7 @@ async function handleTaskButton(interaction) {
       .addOptions(
         all.slice(0, 25).map((t) => ({
           label: `${taskTag(t)} ${t.title}`.slice(0, 100),
-          description: `${TASK_STATUS_LABELS[t.status]} · ${t.progress}%`.slice(0, 100),
+          description: `${TASK_STATUS_LABELS[t.status]} · ${t.title}`.slice(0, 100),
           value: t.id,
         })),
       );
@@ -468,7 +461,7 @@ async function handleTaskButton(interaction) {
         {
           color: 0xef4444,
           title: '🗑 Delete a Task',
-          description: 'Select a task to delete. This permanently removes it, its history, and its spreadsheet row.',
+          description: 'Select a task to delete. This permanently removes it from the board.',
         },
       ],
       components: [row],
@@ -520,7 +513,7 @@ async function handleTaskButton(interaction) {
         {
           color: 0xef4444,
           title: '🗑 Task Deleted',
-          description: `**${deleted}**\n\nTask, its history, and its spreadsheet row were permanently removed.`,
+          description: `**${deleted}**\n\nTask permanently removed from the board.`,
         },
       ],
       components: [],
@@ -580,14 +573,6 @@ async function handleTaskButton(interaction) {
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
           .setPlaceholder('Type a name/ID, or leave blank for the user picker'),
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('phnxt_f_priority')
-          .setLabel('Priority (Low / Normal / High)')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue('Normal'),
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -698,19 +683,11 @@ async function handleTaskButton(interaction) {
     modal.addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
-          .setCustomId('phnxt_f_progress')
-          .setLabel('Progress (0-100)')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setValue(String(task.progress)),
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
           .setCustomId('phnxt_f_status')
-          .setLabel('Status (Open / In Progress)')
+          .setLabel('Status (Open / In Progress / Blocked)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setValue(task.status === 'OPEN' ? 'Open' : 'In Progress'),
+          .setValue(task.status === 'OPEN' ? 'Open' : task.status === 'BLOCKED' ? 'Blocked' : 'In Progress'),
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -893,7 +870,24 @@ async function handleUserSelect(interaction) {
   }
   if (id.startsWith('phnxt_new_assign:')) {
     const taskId = id.slice('phnxt_new_assign:'.length);
-    return applyAssignment(interaction, taskId);
+    const task = await findTask(taskId);
+    if (!task) {
+      await interaction.reply({ content: '⚠️ That task no longer exists.', flags: EPHEMERAL_FLAG });
+      return;
+    }
+    const result = await assignTaskToUser(task, interaction.values?.[0], interaction.user.id);
+    if (!result.ok) {
+      await interaction.update({ content: `⚠️ ${result.error}`, embeds: [], components: [] });
+      return;
+    }
+    const embed = {
+      color: 0x22c55e,
+      title: '👤 Task Assigned',
+      description: `**${taskTag(result.task)} ${result.task.title}**\n\nNow assigned to <@${result.task.assignedTo}> and set to **In Progress**.`,
+    };
+    await interaction.update({ embeds: [embed], components: [] });
+    await updateTasksPanel(interaction.client);
+    return;
   }
   await interaction.reply({ content: 'Unknown action.', flags: EPHEMERAL_FLAG });
 }
@@ -920,7 +914,6 @@ async function handleTaskModal(interaction) {
       await interaction.reply({ content: `⚠️ ${assign.error}`, flags: EPHEMERAL_FLAG });
       return;
     }
-    const priority = normalizePriority(get('phnxt_f_priority'));
     const due = parseDueDate(get('phnxt_f_due'));
     if (due.error) {
       await interaction.reply({ content: `⚠️ ${due.error}`, flags: EPHEMERAL_FLAG });
@@ -928,12 +921,10 @@ async function handleTaskModal(interaction) {
     }
 
     const task = await createTask({
-      guildId: interaction.guild.id,
       title,
       description: get('phnxt_f_desc') || null,
       createdBy: interaction.user.id,
       assignedTo: assign.id,
-      priority,
       dueDate: due.date,
     });
 
@@ -967,7 +958,6 @@ async function handleTaskModal(interaction) {
       description: [
         `**${taskTag(task)} ${task.title}**`,
         '',
-        `Priority: ${TASK_PRIORITY_LABELS[task.priority]}`,
         `Status: ${TASK_STATUS_LABELS[task.status]}`,
         `Assigned to: ${task.assignedTo ? `<@${task.assignedTo}>` : '💼 Available to claim'}`,
         task.dueDate ? `Due: ${shortDate(task.dueDate)}` : '',
@@ -988,18 +978,13 @@ async function handleTaskModal(interaction) {
       return;
     }
 
-    const progress = Math.floor(Number(get('phnxt_f_progress')));
-    if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
-      await interaction.reply({ content: '⚠️ Progress must be a number between 0 and 100.', flags: EPHEMERAL_FLAG });
-      return;
-    }
     const status = normalizeStatus(get('phnxt_f_status'));
     const note = get('phnxt_f_note');
 
-    if (status === TASK_STATUS.COMPLETED || progress === 100) {
+    if (status === TASK_STATUS.COMPLETED) {
       const updated = await completeTask(task, {
         userId: interaction.user.id,
-        note: status === TASK_STATUS.COMPLETED ? note : `Completed (progress 100%).${note ? ' ' + note : ''}`,
+        note: note || 'Completed via status update.',
       });
       const embed = {
         color: 0x22c55e,
@@ -1012,26 +997,26 @@ async function handleTaskModal(interaction) {
         ].join('\n'),
       };
       await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
-    } else if (status) {
-      const updated = await applyTaskUpdate(task, {
-        userId: interaction.user.id,
-        progress,
-        status,
-        note: note || null,
+    } else if (status === TASK_STATUS.CANCELLED) {
+      await interaction.reply({
+        content: '⚠️ To cancel a task use the spreadsheet (Status = Cancelled).',
+        flags: EPHEMERAL_FLAG,
       });
+      return;
+    } else if (status && UPDATE_STATUSES.includes(status)) {
+      const updated = await applyTaskUpdate(task, { userId: interaction.user.id, status, note: note || null });
       const embed = {
-        color: status === 'IN_PROGRESS' ? 0xf59e0b : 0x3b82f6,
+        color: status === 'IN_PROGRESS' ? 0xf59e0b : status === 'BLOCKED' ? 0xef4444 : 0x3b82f6,
         title: '📝 Task Updated',
         description: [
           `**${taskTag(updated)} ${updated.title}**`,
-          `Progress: ${progress}%`,
           `Status: ${TASK_STATUS_LABELS[status]}`,
         ].join('\n'),
       };
       await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
     } else {
       await interaction.reply({
-        content: '⚠️ Status must be one of: Open, In Progress (or Done to complete).',
+        content: '⚠️ Status must be one of: Open, In Progress, Blocked (or Done to complete).',
         flags: EPHEMERAL_FLAG,
       });
       return;
@@ -1142,7 +1127,7 @@ async function openHelpCommand(interaction) {
       + '**👤 Assign Task** — Leadership assigns an existing task to a member.\n'
       + '**🙋 Claim Task** — Claim an open task for yourself.\n'
       + '**📊 View Spreadsheet** — Open the task google sheet.\n\n'
-      + 'Manage your own tasks (progress updates, release, complete) with `/phnx-mytasks`.',
+      + 'Manage your own tasks (status updates, release, complete) with `/phnx-mytasks`.',
   };
   await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
 }

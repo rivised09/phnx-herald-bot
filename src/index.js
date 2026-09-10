@@ -8,7 +8,7 @@ const { enableChannelSync, syncChannels } = require('./bot/events/channel-sync')
 const { startPingScheduler } = require('./bot/events/pings');
 const { ensureTasksPanel } = require('./bot/tasks/task-panel');
 const { onInteractionCreate } = require('./bot/interactions/handler');
-const { setClient, ensureHeaders, syncMembers, migrateLegacyLayout, listTasks, isConfigured } = require('./sheets');
+const { setClient, ensureHeaders, syncMembers, listTasks, isConfigured } = require('./sheets');
 const { updateTasksPanel } = require('./bot/tasks/task-panel');
 
 validateEnv();
@@ -68,7 +68,6 @@ client.once('clientReady', async () => {
 
     if (isConfigured()) {
       try {
-        await migrateLegacyLayout();
         await ensureHeaders();
         await Promise.all([syncMembers(guild), ensureTasksPanel(client)]);
         console.log('[SHEETS] Sync ready, spreadsheet configured.');
