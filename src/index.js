@@ -10,6 +10,7 @@ const { ensureTasksPanel } = require('./bot/tasks/task-panel');
 const { onInteractionCreate } = require('./bot/interactions/handler');
 const { setClient, ensureHeaders, syncMembers, listTasksAndArchive, isConfigured } = require('./sheets');
 const { updateTasksPanel } = require('./bot/tasks/task-panel');
+const { ensureAssignedPings, checkSheetAssignments } = require('./bot/tasks/task-pings');
 
 validateEnv();
 
@@ -70,6 +71,7 @@ client.once('clientReady', async () => {
       try {
         await ensureHeaders();
         await Promise.all([syncMembers(guild), ensureTasksPanel(client)]);
+        ensureAssignedPings(client).catch(() => {});
         console.log('[SHEETS] Sync ready, spreadsheet configured.');
 
         let lastSignature = '';
@@ -83,6 +85,7 @@ client.once('clientReady', async () => {
             if (signature !== lastSignature) {
               lastSignature = signature;
               await updateTasksPanel(client);
+              await checkSheetAssignments(client, tasks).catch(() => {});
               console.log(`[SHEETS] Task board refreshed from spreadsheet (${tasks.length} active, ${archived.length} archived).`);
             }
             membersTick++;

@@ -658,6 +658,22 @@ async function getTaskUpdates(idToken, guild) {
     }));
 }
 
+async function getHelperNames() {
+  try {
+    const rows = await readValues('MEMBERS', 'A3:G1000');
+    const map = new Map();
+    for (const r of rows) {
+      const id = String(r[0] || '').trim();
+      const name = String(r[6] || '').trim();
+      if (id && name) map.set(id, name);
+    }
+    return map;
+  } catch (err) {
+    console.warn('[SHEETS] Could not read helper names:', err.message);
+    return new Map();
+  }
+}
+
 // ---------- members ----------
 
 async function syncMembers(guild) {
@@ -704,4 +720,5 @@ module.exports = {
   getTaskUpdates,
   appendTaskUpdate,
   syncMembers,
+  getHelperNames,
 };
