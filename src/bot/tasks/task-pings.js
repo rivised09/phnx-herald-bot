@@ -1,6 +1,6 @@
 const { CONFIG } = require('../../config');
 const prisma = require('../../db');
-const { listTasks, getTaskUpdates, getHelperNames, getGuild } = require('../../sheets');
+const { listTasks, getGuild, getHelperNames } = require('../../sheets');
 
 let pingedMap = new Map(); // taskId -> assigneeId that was last pinged for this task
 
@@ -41,12 +41,11 @@ async function persistPinged(guildId) {
   }
 }
 
-async function sendAssignedPing(client, task, assignerId) {
+async function sendAssignedPing(client, task) {
   const channelId = CONFIG.CHANNELS.PERSONAL_PINGS;
   const guildId = CONFIG.DISCORD.GUILD_ID;
   if (!channelId || !task.assignedTo) return;
 
-  const key = task.id;
   if (pingedMap.get(task.id) === task.assignedTo) return; // assignee unchanged since last ping
 
   const channel = client.channels.cache.get(channelId);
@@ -57,36 +56,22 @@ async function sendAssignedPing(client, task, assignerId) {
 
   const guild = client.guilds.cache.get(guildId) || null;
   const helperNames = await getHelperNames().catch(() => new Map());
-  const nameFor = (id) => {
-    const member = guild?.members.cache.get(id);
-    const helper = helperNames.get(id);
-    return helper || member?.nickname || member?.user?.username || String(id);
-  };
-
-  // Assignee: always a true @mention so Discord notifies them, annotated with their helper name.
-  const assignee = `<@${task.assignedTo}> (${nameFor(task.assignedTo)})`;
-
-  // Assigner: mention when known, otherwise fall back to their helper name.
-  let assigner = 'someone';
-  if (assignerId) {
-    assigner = guild?.members.cache.has(assignerId)
-      ? `<@${assignerId}> (${nameFor(assignerId)})`
-      : nameFor(assignerId);
-  }
+  const assigneeName = (() => {
+    const helper = helperNames.get(task.assignedTo);
+    if (helper) return helper;
+    const member = guild?.members.cache.get(task.assignedTo);
+    return member?.nickname || member?.user?.username || '';
+  })();
 
   try {
-    const taskChannel = CONFIG.CHANNELS.TASKS ? `<#${CONFIG.CHANNELS.TASKS}>` : 'the To-Do channel spreadsheet';
-    const due = task.dueDate
-      ? `\n> 📅 Due ${new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
-      : '';
+    const taskChannel = CONFIG.CHANNELS.TASKS ? `<#${CONFIG.CHANNELS.TASKS}> spreadsheet` : 'To-Do channel spreadsheet';
+    const assignee = `<@${task.assignedTo}>${assigneeName ? ` (**${assigneeName}**)` : ''}`;
     const lines = [
       '**New Task Assigned!**',
       '',
-      `${assignee} you've been assigned a new task by ${assigner}.`,
+      `${assignee} you've been assigned a new task.`,
       '',
-      `> ${task.title}${due}`,
-      '',
-      `To view your tasks, use \`/phnx-mytasks\` to see your personal task list, or check ${taskChannel}.`,
+      `To view your tasks, use \`/phnx-mytasks\` command to see your personal task list, or check the ${taskChannel}.`,
     ];
     await channel.send(lines.join('\n'));
     pingedMap.set(task.id, task.assignedTo);
@@ -100,15 +85,7 @@ async function checkSheetAssignments(client, tasks) {
   for (const task of tasks) {
     if (!(task.assignedTo && task.status === 'IN_PROGRESS')) continue;
     if (pingedMap.get(task.id) === task.assignedTo) continue;
-    let assignerId = null;
-    try {
-      const updates = await getTaskUpdates(task.id, client.guilds.cache.get(CONFIG.DISCORD.GUILD_ID) || null);
-      const last = [...updates].reverse().find((u) => u.userId) || null;
-      assignerId = last?.userId || null;
-    } catch {
-      assignerId = null;
-    }
-    await sendAssignedPing(client, task, assignerId);
+    await sendAssignedPing(client, task);
   }
 }
 

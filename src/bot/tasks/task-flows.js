@@ -358,7 +358,7 @@ async function applyAssignment(interaction, taskId) {
   };
   await interaction.update({ embeds: [embed], components: [] });
   await updateTasksPanel(interaction.client);
-  if (result.task.assignedTo) await sendAssignedPing(interaction.client, result.task, interaction.user.id);
+  if (result.task.assignedTo) await sendAssignedPing(interaction.client, result.task);
 }
 
 async function openEditModal(interaction, task) {
@@ -1153,7 +1153,7 @@ async function handleUserSelect(interaction) {
     };
     await interaction.update({ embeds: [embed], components: [] });
     await updateTasksPanel(interaction.client);
-    if (result.task.assignedTo) await sendAssignedPing(interaction.client, result.task, interaction.user.id);
+    if (result.task.assignedTo) await sendAssignedPing(interaction.client, result.task);
     return;
   }
   await interaction.reply({ content: 'Unknown action.', flags: EPHEMERAL_FLAG });
@@ -1234,7 +1234,7 @@ async function handleTaskModal(interaction) {
     };
     await interaction.reply({ flags: EPHEMERAL_FLAG, embeds: [embed] });
     await updateTasksPanel(interaction.client);
-    if (task.assignedTo) await sendAssignedPing(interaction.client, task, interaction.user.id);
+    if (task.assignedTo) await sendAssignedPing(interaction.client, task);
     return;
   }
 
