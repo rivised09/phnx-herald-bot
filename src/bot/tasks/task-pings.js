@@ -2,7 +2,7 @@ const { CONFIG } = require('../../config');
 const prisma = require('../../db');
 const { listTasks, getTaskUpdates, getHelperNames, getGuild } = require('../../sheets');
 
-let pingedKeys = new Set();
+let pingedMap = new Map(); // taskId -> assigneeId that was last pinged for this task
 
 function settingKey(guildId) {
   return `tasks_assigned_pinged:${guildId}`;
@@ -11,21 +11,33 @@ function settingKey(guildId) {
 async function loadPinged(guildId) {
   try {
     const stored = await prisma.setting.findUnique({ where: { key: settingKey(guildId) } });
-    if (stored?.value) pingedKeys = new Set(JSON.parse(stored.value));
+    if (!stored?.value) return;
+    const parsed = JSON.parse(stored.value);
+    if (Array.isArray(parsed)) {
+      pingedMap = new Map(
+        parsed.map((k) => {
+          const idx = String(k).lastIndexOf(':');
+          return [String(k).slice(0, idx), String(k).slice(idx + 1)];
+        }),
+      );
+    } else {
+      pingedMap = new Map(Object.entries(parsed));
+    }
   } catch (err) {
-    console.warn('[TASK-PINGS] Failed to load pinged set:', err.message);
+    console.warn('[TASK-PINGS] Failed to load pinged map:', err.message);
   }
 }
 
 async function persistPinged(guildId) {
   try {
+    const value = JSON.stringify(Object.fromEntries(pingedMap));
     await prisma.setting.upsert({
       where: { key: settingKey(guildId) },
-      update: { value: JSON.stringify([...pingedKeys]) },
-      create: { key: settingKey(guildId), value: JSON.stringify([...pingedKeys]) },
+      update: { value },
+      create: { key: settingKey(guildId), value },
     });
   } catch (err) {
-    console.warn('[TASK-PINGS] Failed to persist pinged set:', err.message);
+    console.warn('[TASK-PINGS] Failed to persist pinged map:', err.message);
   }
 }
 
@@ -34,8 +46,8 @@ async function sendAssignedPing(client, task, assignerId) {
   const guildId = CONFIG.DISCORD.GUILD_ID;
   if (!channelId || !task.assignedTo) return;
 
-  const key = `${task.id}:${task.assignedTo}`;
-  if (pingedKeys.has(key)) return; // ping exactly once per task+assignee
+  const key = task.id;
+  if (pingedMap.get(task.id) === task.assignedTo) return; // assignee unchanged since last ping
 
   const channel = client.channels.cache.get(channelId);
   if (!channel) {
@@ -77,7 +89,7 @@ async function sendAssignedPing(client, task, assignerId) {
       `To view your tasks, use \`/phnx-mytasks\` to see your personal task list, or check ${taskChannel}.`,
     ];
     await channel.send(lines.join('\n'));
-    pingedKeys.add(key);
+    pingedMap.set(task.id, task.assignedTo);
     await persistPinged(guildId);
   } catch (err) {
     console.warn(`[TASK-PINGS] Could not send assignment ping: ${err.message}`);
@@ -87,7 +99,7 @@ async function sendAssignedPing(client, task, assignerId) {
 async function checkSheetAssignments(client, tasks) {
   for (const task of tasks) {
     if (!(task.assignedTo && task.status === 'IN_PROGRESS')) continue;
-    if (pingedKeys.has(`${task.id}:${task.assignedTo}`)) continue;
+    if (pingedMap.get(task.id) === task.assignedTo) continue;
     let assignerId = null;
     try {
       const updates = await getTaskUpdates(task.id, client.guilds.cache.get(CONFIG.DISCORD.GUILD_ID) || null);
