@@ -1,7 +1,7 @@
 const prisma = require('../../db');
 const { CONFIG } = require('../../config');
-const { updateEventMessage, deleteEventMessage, sendNotification } = require('./posting');
-const { cancelScheduledEvent, deleteScheduledEvent, mapEntityType } = require('./scheduled');
+const { updateEventMessage, deleteEventMessage, deleteReminderMessage, sendNotification } = require('./posting');
+const { deleteScheduledEvent, mapEntityType } = require('./scheduled');
 
 async function rearmPingWindows(eventId, startTime) {
   const remainingMs = startTime.getTime() - Date.now();
@@ -69,6 +69,12 @@ async function syncEventUpdate(client, updated, { notifyModified = true, previou
 
 async function cancelEventDiscord(client, updated) {
   try {
+    await deleteReminderMessage(client, updated.reminderMessageId);
+  } catch (err) {
+    console.error('[EVENT-ACTIONS] Failed to delete reminder message:', err.message);
+  }
+
+  try {
     await updateEventMessage(client, updated, { cancelled: true });
   } catch (err) {
     console.error('[EVENT-ACTIONS] Failed to update cancelled embed:', err.message);
@@ -87,13 +93,19 @@ async function cancelEventDiscord(client, updated) {
 
   try {
     const guild = await client.guilds.fetch(CONFIG.DISCORD.GUILD_ID);
-    await cancelScheduledEvent(guild, updated.discordEventId);
+    await deleteScheduledEvent(guild, updated.discordEventId);
   } catch (err) {
-    console.error('[EVENT-ACTIONS] Failed to cancel Discord scheduled event:', err.message);
+    console.error('[EVENT-ACTIONS] Failed to remove scheduled event from Discord calendar:', err.message);
   }
 }
 
 async function deleteEventDiscord(client, event) {
+  try {
+    await deleteReminderMessage(client, event.reminderMessageId);
+  } catch (err) {
+    console.error('[EVENT-ACTIONS] Failed to delete reminder message:', err.message);
+  }
+
   try {
     await deleteEventMessage(client, event);
   } catch (err) {

@@ -14,6 +14,7 @@ const { isLeadershipUser } = require('../../utils/role-check');
 const { formatUtcDateTime, formatUtcInput, parseUtcInput } = require('../../utils/time');
 const { syncEventUpdate, cancelEventDiscord, deleteEventDiscord } = require('../events/event-actions');
 const { updateEventMessage, sendNotification } = require('../events/posting');
+const { deleteScheduledEvent } = require('../events/scheduled');
 
 const EPHEMERAL_FLAG = 64;
 const MAX_SELECT_OPTIONS = 25;
@@ -400,6 +401,12 @@ async function handleConfirmComplete(interaction) {
       data: { status: 'COMPLETED' },
     });
     await updateEventMessage(interaction.client, updated);
+    try {
+      const guild = await interaction.client.guilds.fetch(CONFIG.DISCORD.GUILD_ID);
+      await deleteScheduledEvent(guild, updated.discordEventId);
+    } catch (err) {
+      console.error('[BUTTONS] Failed to remove scheduled event from Discord calendar:', err.message);
+    }
     await sendNotification(
       interaction.client,
       updated,

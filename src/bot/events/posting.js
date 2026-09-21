@@ -65,6 +65,28 @@ async function deleteEventMessage(client, event) {
   return true;
 }
 
+async function deleteReminderMessage(client, messageId) {
+  if (!messageId) return null;
+  const channel = await getRemindersChannel(client);
+  if (!channel) return null;
+  const message = await channel.messages.fetch(messageId).catch(() => null);
+  if (!message) return null;
+  await message.delete();
+  return true;
+}
+
+async function markReminderEnded(client, event) {
+  if (!event.reminderMessageId) return null;
+  const channel = await getRemindersChannel(client);
+  if (!channel) return null;
+  const message = await channel.messages.fetch(event.reminderMessageId).catch(() => null);
+  if (!message) return null;
+  const original = message.content || '';
+  const content = `**EVENT ENDED**\n${original}`.trim();
+  await message.edit({ content });
+  return true;
+}
+
 async function sendNotification(client, event, content, { cancelled = false } = {}) {
   const channel = (await getRemindersChannel(client)) || (await getEventsChannel(client));
   if (!channel) return null;
@@ -93,6 +115,8 @@ module.exports = {
   postEventMessage,
   updateEventMessage,
   deleteEventMessage,
+  deleteReminderMessage,
+  markReminderEnded,
   sendNotification,
   sendPing,
 };

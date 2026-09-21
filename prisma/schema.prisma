@@ -23,6 +23,8 @@ model Event {
   discordMessageId String?  @map("discord_message_id") @db.VarChar(40)
   discordEventId   String?  @map("discord_event_id") @db.VarChar(40)
 
+  reminderMessageId String? @map("reminder_message_id") @db.VarChar(40)
+
   pingOneHour      Boolean  @default(false) @map("ping_one_hour")
   pingThirtyMin    Boolean  @default(false) @map("ping_thirty_min")
   pingTenMin       Boolean  @default(false) @map("ping_ten_min")

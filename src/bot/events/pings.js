@@ -2,7 +2,7 @@ const cron = require('node-cron');
 const prisma = require('../../db');
 const { CONFIG } = require('../../config');
 const { msUntil } = require('../../utils/time');
-const { sendPing, updateEventMessage } = require('./posting');
+const { sendPing, updateEventMessage, deleteReminderMessage, markReminderEnded } = require('./posting');
 
 async function checkEventPings(client) {
   const now = Date.now();
@@ -24,8 +24,14 @@ async function checkEventPings(client) {
 
       try {
         const windowLabel = windowInfo.label;
-        await sendPing(client, event, windowLabel);
-        const data = { [windowInfo.key]: true };
+
+        // Keep only ONE reminder in the channel: delete the previous one before
+        // firing the next window, so it stays a single message while still pinging
+        // @everyone on a fresh message at every window.
+        await deleteReminderMessage(client, event.reminderMessageId);
+
+        const message = await sendPing(client, event, windowLabel);
+        const data = { [windowInfo.key]: true, reminderMessageId: message?.id || event.reminderMessageId || null };
         if (windowInfo.key === 'pingStarted' && event.status === 'SCHEDULED') {
           data.status = 'ACTIVE';
         }
@@ -36,7 +42,7 @@ async function checkEventPings(client) {
         await updateEventMessage(client, updated, {
           pingNote: windowInfo.key === 'pingStarted' ? null : `Starts in ${windowLabel}`,
         });
-        console.log(`[PINGS] Sent "${windowLabel}" ping for event "${event.title}"`);
+        console.log(`[PINGS] Sent "${windowLabel}" ping for event "${event.title}" (previous reminder replaced).`);
       } catch (err) {
         console.error(`[PINGS] Failed to send "${windowInfo.label}" ping for "${event.title}":`, err.message);
       }
@@ -61,7 +67,8 @@ async function completeEndedEvents(client) {
         data: { status: 'COMPLETED' },
       });
       await updateEventMessage(client, updated);
-      console.log(`[PINGS] Event "${updated.title}" marked COMPLETED and embed updated.`);
+      await markReminderEnded(client, updated);
+      console.log(`[PINGS] Event "${updated.title}" marked COMPLETED and last reminder edited to "EVENT ENDED".`);
     } catch (err) {
       console.error(`[PINGS] Failed to complete event "${event.title}":`, err.message);
     }
