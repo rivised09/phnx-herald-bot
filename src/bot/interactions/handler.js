@@ -4,6 +4,7 @@ const { todayCommand } = require('../commands/today');
 const { upcomingCommand } = require('../commands/upcoming');
 const { pingReset } = require('../commands/ping-reset');
 const { completeCommand } = require('../commands/complete');
+const { playersInfoCommand } = require('../commands/players-info');
 const { handleButtonInteraction, handleModalSubmit } = require('./buttons');
 const {
   handleTaskInteraction,
@@ -47,6 +48,9 @@ function onInteractionCreate(client) {
             break;
           case 'phnx-tasks-help':
             await openHelpCommand(interaction);
+            break;
+          case 'phnx-players-info':
+            await playersInfoCommand(interaction);
             break;
           default:
             await interaction.reply({

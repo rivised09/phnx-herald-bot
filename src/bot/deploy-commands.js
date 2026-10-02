@@ -37,6 +37,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('phnx-tasks-help')
     .setDescription('❓ How the task system works'),
+
+  new SlashCommandBuilder()
+    .setName('phnx-players-info')
+    .setDescription('📊 Show the alliance player information button (leadership only)'),
 ];
 
 async function registerCommands() {

@@ -8,7 +8,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const prisma = require('../../db');
-const { CONFIG, dashboardUrl } = require('../../config');
+const { CONFIG, dashboardUrl, playersInfoUrl } = require('../../config');
 const { buildEventListEmbed, isUpcoming, sortByStart } = require('../commands/helpers');
 const { isLeadershipUser } = require('../../utils/role-check');
 const { formatUtcDateTime, formatUtcInput, parseUtcInput } = require('../../utils/time');
@@ -122,6 +122,25 @@ async function handleDashboardOpen(interaction) {
   const row = new ActionRowBuilder().addComponents(link);
   await interaction.reply({
     content: '✅ Dashboard access granted. Click the button to open it in your browser:',
+    components: [row],
+    flags: EPHEMERAL_FLAG,
+  });
+}
+
+async function handlePlayersInfoOpen(interaction) {
+  if (!isLeadershipUser(interaction)) {
+    await denyUnauthorized(interaction);
+    return;
+  }
+
+  const link = new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    .setLabel('📋 See Players Info')
+    .setURL(playersInfoUrl());
+
+  const row = new ActionRowBuilder().addComponents(link);
+  await interaction.reply({
+    content: '✅ Player information access granted. Click the button to open it in your browser:',
     components: [row],
     flags: EPHEMERAL_FLAG,
   });
@@ -486,6 +505,8 @@ async function handleButtonInteraction(interaction) {
       await handleAllEvents(interaction);
     } else if (customId === 'phnx_dashboard_open') {
       await handleDashboardOpen(interaction);
+    } else if (customId === 'phnx_players_info_open') {
+      await handlePlayersInfoOpen(interaction);
     } else if (customId === 'phnx_manage_events') {
       await handleManageEvents(interaction);
     } else if (customId === 'phnx_pick_event') {

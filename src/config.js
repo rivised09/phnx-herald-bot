@@ -108,4 +108,11 @@ function dashboardUrl() {
   return `${base}/dashboard?code=${encodeURIComponent(code)}`;
 }
 
-module.exports = { CONFIG, validateEnv, dashboardUrl };
+function playersInfoUrl() {
+  const base = CONFIG.APP.CLIENT_URL;
+  const code = CONFIG.APP.DASHBOARD_ACCESS_CODE;
+  if (!code) return `${base}/players`;
+  return `${base}/players?code=${encodeURIComponent(code)}`;
+}
+
+module.exports = { CONFIG, validateEnv, dashboardUrl, playersInfoUrl };
