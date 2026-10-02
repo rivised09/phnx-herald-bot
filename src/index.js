@@ -11,10 +11,16 @@ const { onInteractionCreate } = require('./bot/interactions/handler');
 const { setClient, ensureHeaders, syncMembers, listTasksAndArchive, isConfigured } = require('./sheets');
 const { updateTasksPanel } = require('./bot/tasks/task-panel');
 const { ensureAssignedPings, checkSheetAssignments } = require('./bot/tasks/task-pings');
+const { getAutoRefreshConfig } = require('./settings');
 
 validateEnv();
 
 let scheduler = null;
+
+// Spreadsheet auto-refresh loop state (toggled from the web dashboard).
+const SHEET_IDLE_POLL_MS = 15000;
+let sheetRefreshTimer = null;
+let sheetRefreshActive = null;
 
 const app = createApp({ client });
 
@@ -32,6 +38,10 @@ async function shutdown(signal) {
     if (scheduler) scheduler.stop();
   } catch {
     /* ignore */
+  }
+  if (sheetRefreshTimer) {
+    clearTimeout(sheetRefreshTimer);
+    sheetRefreshTimer = null;
   }
   server.close();
   try {
@@ -100,9 +110,42 @@ client.once('clientReady', async () => {
           }
         };
 
-        setTimeout(refreshBoardFromSheet, 3000);
-        setInterval(refreshBoardFromSheet, 30000);
-        console.log('[SHEETS] Spreadsheet → Discord sync every 30s (manual 🔄 Refresh for instant).');
+        // Auto-refresh is toggled from the web dashboard (persisted in the settings table).
+        // While disabled we only poll the DB (cheap) and skip all Sheets/Discord API work.
+        const waitFor = (ms) =>
+          new Promise((resolve) => {
+            sheetRefreshTimer = setTimeout(() => {
+              sheetRefreshTimer = null;
+              resolve();
+            }, ms);
+          });
+
+        const sheetLoop = async () => {
+          while (!shuttingDown) {
+            let delayMs = SHEET_IDLE_POLL_MS;
+            try {
+              const cfg = await getAutoRefreshConfig();
+              if (cfg.enabled) {
+                await refreshBoardFromSheet();
+                delayMs = cfg.intervalMs;
+                if (sheetRefreshActive === false) console.log('[SHEETS] Auto-refresh resumed.');
+                sheetRefreshActive = true;
+              } else {
+                if (sheetRefreshActive === true) console.log('[SHEETS] Auto-refresh paused via dashboard.');
+                sheetRefreshActive = false;
+              }
+            } catch (err) {
+              console.warn('[SHEETS] Auto-refresh loop error:', err.message);
+            }
+            await waitFor(delayMs);
+          }
+          console.log('[SHEETS] Auto-refresh loop stopped.');
+        };
+
+        const initialCfg = await getAutoRefreshConfig();
+        sheetRefreshActive = initialCfg.enabled;
+        if (initialCfg.enabled) await refreshBoardFromSheet();
+        sheetLoop().catch((err) => console.warn('[SHEETS] Auto-refresh loop crashed:', err.message));
       } catch (err) {
         console.warn('[SHEETS] Initial sync skipped:', err.message);
       }

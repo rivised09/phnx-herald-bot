@@ -704,10 +704,175 @@ async function syncMembers(guild) {
   await writeValues('MEMBERS', `A3:F${2 + rows.length}`, rows);
 }
 
+async function surveyRequest(path, { method = 'GET', body } = {}) {
+  const token = await getAccessToken();
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${surveySpreadsheetId()}${path}`,
+    {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    },
+  );
+  const data = res.status === 204 ? null : await res.json();
+  if (!res.ok) throw new Error(`Sheets API ${res.status}: ${JSON.stringify(data)}`);
+  return data;
+}
+
+function extractSpreadsheetId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (match) return match[1];
+  if (/^[a-zA-Z0-9-_]+$/.test(raw)) return raw;
+  return null;
+}
+
+function surveySpreadsheetId() {
+  const id =
+    extractSpreadsheetId(CONFIG.GOOGLE.SURVEY_SPREADSHEET_ID) ||
+    extractSpreadsheetId(CONFIG.GOOGLE.SURVEY_SPREADSHEET_URL);
+  if (!id) throw new Error('Survey spreadsheet is not configured (set SURVEY_SPREADSHEET_URL or SURVEY_SPREADSHEET_ID).');
+  return id;
+}
+
+function isSurveyConfigured() {
+  if (surveySpreadsheetIdSafe()) return true;
+  const raw = CONFIG.GOOGLE.SURVEY_SPREADSHEET_URL || CONFIG.GOOGLE.SURVEY_SPREADSHEET_ID;
+  return Boolean(extractSpreadsheetId(raw));
+}
+
+function surveySpreadsheetIdSafe() {
+  try {
+    return surveySpreadsheetId();
+  } catch {
+    return null;
+  }
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let value = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          value += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        value += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (ch === ',') {
+      row.push(value);
+      value = '';
+      continue;
+    }
+    if (ch === '\r') continue;
+    if (ch === '\n') {
+      row.push(value);
+      rows.push(row);
+      row = [];
+      value = '';
+      continue;
+    }
+    value += ch;
+  }
+  if (value.length > 0 || row.length > 0) {
+    row.push(value);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function extractGid(value) {
+  const raw = String(value || '');
+  const hash = raw.match(/[#&]gid=([0-9]+)/);
+  return hash ? hash[1] : null;
+}
+
+async function fetchPublicSurveyRows() {
+  const raw = CONFIG.GOOGLE.SURVEY_SPREADSHEET_URL || CONFIG.GOOGLE.SURVEY_SPREADSHEET_ID;
+  const id = extractSpreadsheetId(raw);
+  if (!id) return null;
+
+  const gid = extractGid(raw) || CONFIG.GOOGLE.SURVEY_SHEET_GID || '';
+  const url = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv${gid ? `&gid=${gid}` : ''}`;
+
+  const res = await fetch(url, {
+    redirect: 'follow',
+    headers: { 'user-agent': 'Mozilla/5.0 (compatible; phoenix-herald/1.0)' },
+  });
+
+  if (!res.ok) {
+    throw new Error(
+      `Survey sheet is not publicly readable (export returned ${res.status}). ` +
+        'Set sharing to "Anyone with the link" (Viewer).',
+    );
+  }
+
+  const text = await res.text();
+  if (text.trimStart().startsWith('<')) {
+    throw new Error(
+      'Survey sheet is not publicly readable (got an HTML page back). ' +
+        'Set sharing to "Anyone with the link" (Viewer).',
+    );
+  }
+  return parseCsv(text);
+}
+
+async function readSurveyRows() {
+  if (CONFIG.GOOGLE.SURVEY_SHEET_NAME && CONFIG.GOOGLE.SERVICE_ACCOUNT && surveySpreadsheetIdSafe()) {
+    const range = CONFIG.GOOGLE.SURVEY_RANGE || 'A:Z';
+    const path = `/values/${quoteSheet(CONFIG.GOOGLE.SURVEY_SHEET_NAME)}!${range}?valueRenderOption=UNFORMATTED_VALUE`;
+    const data = await surveyRequest(path);
+    return data.values || [];
+  }
+
+  const publicRows = await fetchPublicSurveyRows();
+  if (publicRows) return publicRows;
+  throw new Error('Survey spreadsheet is not configured (set SURVEY_SPREADSHEET_URL).');
+}
+
+async function getSurveyData() {
+  const rows = await readSurveyRows();
+  const headers = (rows[0] || []).map((h) => String(h || '').trim()).filter(Boolean);
+  const data = rows
+    .slice(1)
+    .map((row) => {
+      const record = {};
+      headers.forEach((h, i) => {
+        record[h] = row[i] ?? '';
+      });
+      return record;
+    })
+    .filter((r) => Object.values(r).some((v) => String(v).trim() !== ''));
+  return { headers, rows: data };
+}
+
 module.exports = {
   setClient,
   getGuild,
   isConfigured,
+  isSurveyConfigured,
+  getSurveyData,
+  readSurveyRows,
+  extractSpreadsheetId,
   ensureHeaders,
   invalidateAllReadCache,
   listTasks,

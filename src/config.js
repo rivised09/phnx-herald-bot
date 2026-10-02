@@ -61,6 +61,11 @@ const CONFIG = {
     SPREADSHEET_URL: process.env.SPREADSHEET_URL || null,
     SPREADSHEET_ID: process.env.SPREADSHEET_ID || null,
     SERVICE_ACCOUNT: loadServiceAccount(),
+    SURVEY_SPREADSHEET_URL: process.env.SURVEY_SPREADSHEET_URL || process.env.SURVEY_SHEET_URL || null,
+    SURVEY_SPREADSHEET_ID: process.env.SURVEY_SPREADSHEET_ID || process.env.SURVEY_SHEET_ID || null,
+    SURVEY_SHEET_NAME: process.env.SURVEY_SHEET_NAME || process.env.SURVEY_SHEET || null,
+    SURVEY_SHEET_GID: process.env.SURVEY_SHEET_GID || null,
+    SURVEY_RANGE: process.env.SURVEY_RANGE || 'A:Z',
   },
   ROLES: {
     LEADERSHIP: parseRoleIds(process.env.LEADERSHIP_ROLE_ID),

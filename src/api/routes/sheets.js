@@ -1,6 +1,6 @@
 const express = require('express');
 const { CONFIG } = require('../../config');
-const { syncMembers, getGuild } = require('../../sheets');
+const { syncMembers, getGuild, isSurveyConfigured, getSurveyData } = require('../../sheets');
 
 function sheetsRouter() {
   const router = express.Router();
@@ -20,6 +20,22 @@ function sheetsRouter() {
       await guild.members.fetch().catch(() => {});
       await syncMembers(guild);
       res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.get('/survey', async (req, res) => {
+    if (!isSurveyConfigured()) {
+      return res.status(503).json({
+        error:
+          'Survey spreadsheet is not configured. Set SURVEY_SPREADSHEET_URL on the bot.',
+      });
+    }
+
+    try {
+      const data = await getSurveyData();
+      res.json(data);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
