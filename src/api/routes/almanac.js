@@ -41,6 +41,19 @@ function canRead(channel, guild) {
   return perms.has('ViewChannel') && perms.has('ReadMessageHistory');
 }
 
+/**
+ * `Guild#isReady()` no longer exists in discord.js 14.27, so readiness is
+ * inferred from a usable channels manager instead.
+ */
+function resolveGuild(res) {
+  const guild = getGuild();
+  if (!guild || !guild.channels) {
+    res.status(503).json({ error: 'Bot is not ready' });
+    return null;
+  }
+  return guild;
+}
+
 function serializeMessage(message) {
   const author = message.author;
   return {
@@ -77,10 +90,8 @@ function almanacRouter() {
   router.get(
     '/channels',
     asyncHandler(async (req, res) => {
-      const guild = getGuild();
-      if (!guild || !guild.isReady()) {
-        return res.status(503).json({ error: 'Bot is not ready' });
-      }
+      const guild = resolveGuild(res);
+      if (!guild) return;
 
       const fetched = await guild.channels.fetch();
       const channels = [...fetched.values()]
@@ -104,10 +115,8 @@ function almanacRouter() {
   router.get(
     '/channels/:id/messages',
     asyncHandler(async (req, res) => {
-      const guild = getGuild();
-      if (!guild || !guild.isReady()) {
-        return res.status(503).json({ error: 'Bot is not ready' });
-      }
+      const guild = resolveGuild(res);
+      if (!guild) return;
 
       const { id } = req.params;
       const channel =
