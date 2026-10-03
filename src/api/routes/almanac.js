@@ -113,6 +113,44 @@ function almanacRouter() {
   );
 
   router.get(
+    '/channels/heads',
+    asyncHandler(async (req, res) => {
+      const guild = resolveGuild(res);
+      if (!guild) return;
+
+      const fetched = await guild.channels.fetch();
+      const readable = [...fetched.values()].filter(
+        (c) => c && c.isTextBased() && !c.isThread() && c.type !== 'GUILD_CATEGORY' && canRead(c, guild),
+      );
+
+      // One minimal message per channel: enough to detect change without
+      // re-reading history. Failures are reported per channel, not fatal.
+      const pairs = await Promise.all(
+        readable.map(async (c) => {
+          try {
+            const msgs = await c.messages.fetch({ limit: 1 });
+            const latest = [...msgs.values()][0];
+            return [
+              c.id,
+              latest
+                ? {
+                    id: latest.id,
+                    createdAt: latest.createdAt,
+                    author: latest.author?.displayName || latest.author?.username || null,
+                  }
+                : null,
+            ];
+          } catch {
+            return [c.id, null];
+          }
+        }),
+      );
+
+      res.json({ heads: Object.fromEntries(pairs) });
+    }),
+  );
+
+  router.get(
     '/channels/:id/messages',
     asyncHandler(async (req, res) => {
       const guild = resolveGuild(res);
@@ -133,8 +171,9 @@ function almanacRouter() {
         MAX_LIMIT,
       );
       const before = SNOWFLAKE.test(String(req.query.before || '')) ? req.query.before : undefined;
+      const after = SNOWFLAKE.test(String(req.query.after || '')) ? req.query.after : undefined;
 
-      const fetched = await channel.messages.fetch({ limit, before });
+      const fetched = await channel.messages.fetch({ limit, before, after });
       const messages = [...fetched.values()]
         .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
         .map(serializeMessage);
