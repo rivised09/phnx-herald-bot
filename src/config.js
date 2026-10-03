@@ -77,6 +77,7 @@ const CONFIG = {
   APP: {
     CLIENT_URL: process.env.CLIENT_URL || 'http://localhost:3000',
     DASHBOARD_ACCESS_CODE: process.env.DASHBOARD_ACCESS_CODE || null,
+    ALMANAC_SECRET: process.env.ALMANAC_SECRET || null,
     PORT: process.env.PORT || 3001,
   },
   BRANDING: {

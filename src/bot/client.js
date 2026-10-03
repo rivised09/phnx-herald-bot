@@ -6,6 +6,9 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    // Required to read the text of messages the bot did not author.
+    // Must also be enabled for the application in the Discord dev portal.
+    GatewayIntentBits.MessageContent,
   ],
 });
 
