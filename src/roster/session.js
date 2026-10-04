@@ -161,7 +161,6 @@ async function login(page, { username, password }) {
  */
 async function withAuthedPage(work) {
   const pw = requirePlaywright();
-  const creds = credentials();
   const storageState = (await loadSession()) || undefined;
 
   const run = async () => {
@@ -176,17 +175,21 @@ async function withAuthedPage(work) {
       page.setDefaultTimeout(NAV_TIMEOUT_MS);
       page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
 
+      // Credentials are only demanded when a login is actually needed: a
+      // session that is still valid must keep working on its own.
+      const loginNow = async () => login(page, credentials());
+
       try {
         await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
 
         if (await isLoggedOut(page)) {
           console.log('[ROSTER] Session expired, logging in again.');
-          await login(page, creds);
+          await loginNow();
         }
       } catch (err) {
         // A stale or malformed session should trigger a fresh login, not fail.
         if (err.code === 'BAD_CREDENTIALS') throw err;
-        await login(page, creds);
+        await loginNow();
       }
 
       const result = await work(page);

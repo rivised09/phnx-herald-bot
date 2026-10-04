@@ -32,6 +32,17 @@ const DEFAULT_MAX_ALLIANCES = 50;
 const MAX_ROWS = 500;
 const NAV_TIMEOUT_MS = 25000;
 const IDLE_TIMEOUT_MS = 8000;
+/** Allowance for client-rendered pages before we read the DOM. */
+const RENDER_TIMEOUT_MS = 8000;
+/**
+ * What "the data has arrived" looks like.
+ *
+ * The server page renders alliances as a div grid inside a collapsed dropdown
+ * rather than as links or table rows, so waiting only on anchors would time
+ * out on a perfectly good page.
+ */
+const DATA_SELECTOR =
+  '.alliance-item, .lord-entry, table a[href*="alliance"], a[href*="lord"]';
 
 function serverId() {
   const raw = String(process.env.CALLOFSTATS_SERVER_ID || '').trim();
@@ -71,6 +82,17 @@ function crawlBudgetMs() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 25000;
 }
 
+/**
+ * Whether to follow up on each alliance's own page.
+ *
+ * The server page already nests every member beneath its alliance, so walking
+ * those links adds nothing to the roster while costing one page load apiece.
+ * Off by default: enable once we need fields only the detail pages carry.
+ */
+function shouldCrawlAlliances() {
+  return /^(1|true|yes|on)$/i.test(String(process.env.CALLOFSTATS_CRAWL_ALLIANCES || ''));
+}
+
 function allianceUrl(id) {
   return new URL(`/alliance/${id}`, BASE).toString();
 }
@@ -84,15 +106,77 @@ function isLoginPage(page) {
 }
 
 /**
+ * Navigate, then wait for roster links to actually exist.
+ *
+ * The stats site renders its lists client-side, so reading at domcontentloaded
+ * returns an empty DOM and "no rows recognised" follows no matter what the
+ * page eventually contains.
+ */
+async function open(page, url) {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  await page.waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS }).catch(() => {});
+  await page.waitForSelector(DATA_SELECTOR, { timeout: RENDER_TIMEOUT_MS }).catch(() => {});
+}
+
+/**
  * Runs inside the browser against the real rendered DOM.
  *
- * Finds every link whose href carries an id, then lifts the stats out of the
- * nearest table row. `allianceId` is supplied when we are reading an alliance
- * page so its members can be attributed to that alliance.
+ * Two structures are read, in order of preference:
+ *
+ *  1. The server page's own grid - `.alliance-item` cards, each nesting its
+ *     members in `.lord-entry` rows. It is a div layout, not links and not a
+ *     table, and it sits inside a collapsed dropdown, which is precisely why
+ *     it is invisible to innerText and to any link- or table-based parser.
+ *     One page of it yields every alliance on the server plus its members and
+ *     their IDs, so no follow-up request is needed to build both categories.
+ *  2. Anchor hrefs and table rows, kept for alliance/lord detail pages.
+ *
+ * `allianceId` attributes members when reading a page that lists one
+ * alliance's members outside that grid.
  */
 function extractEntities({ allianceId } = {}) {
   const alliances = new Map();
   const players = new Map();
+
+  const raw = (el) => (el && el.textContent ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+  // "Power: 1,234" / "ID: 25732950" -> the value that follows the label.
+  const afterLabel = (el) => raw(el).replace(/^[^:]*:\s*/, '');
+
+  const readLord = (entry, parentAllianceId) => {
+    const id = afterLabel(entry.querySelector('.lord-id')).replace(/\D/g, '');
+    const name = raw(entry.querySelector('.lord-name'));
+    if (!id || !name || players.has(id)) return;
+
+    const stats = {};
+    const rank = raw(entry.querySelector('.lord-position'));
+    const power = afterLabel(entry.querySelector('.lord-power'));
+    if (rank) stats['Rank'] = rank;
+    if (power) stats['Power'] = power;
+
+    players.set(id, { id, name, stats, allianceId: parentAllianceId || allianceId || null });
+  };
+
+  document.querySelectorAll('.alliance-item').forEach((item) => {
+    const name = raw(item.querySelector('.left-group'));
+    if (!name) return;
+
+    let record = alliances.get(name);
+    if (!record) {
+      const stats = {};
+      const power = afterLabel(item.querySelector('.center-group'));
+      const members = raw(item.querySelector('.right-group')).match(/(\d[\d,]*)\s*Lords?/i);
+      if (power) stats['Power'] = power;
+      if (members) stats['Members'] = members[1];
+      record = { id: name, name, stats };
+      alliances.set(name, record);
+    }
+    item.querySelectorAll('.lord-entry').forEach((entry) => readLord(entry, record.id));
+  });
+
+  // Members listed without an enclosing alliance card (detail pages).
+  if (allianceId) {
+    document.querySelectorAll('.lord-entry').forEach((entry) => readLord(entry, allianceId));
+  }
 
   const readHeaders = (row) => {
     const table = row && row.closest('table');
@@ -125,8 +209,11 @@ function extractEntities({ allianceId } = {}) {
   for (const link of document.querySelectorAll('a[href]')) {
     if (seen >= 1000) break;
     const href = link.getAttribute('href') || '';
-    const allianceMatch = href.match(/\/alliance\/(\d+)/);
-    const lordMatch = href.match(/\/lord\/(\d+)/);
+    // Matched without a leading slash so root-relative ("alliance/123") and
+    // absolute hrefs are both recognised; query-string ids are the fallback.
+    const allianceMatch =
+      href.match(/alliance\/(\d+)/) || href.match(/[?&]alliance_?id=(\d+)/i);
+    const lordMatch = href.match(/lord\/(\d+)/) || href.match(/[?&]lord_?id=(\d+)/i);
     if (!allianceMatch && !lordMatch) continue;
 
     const row = link.closest('tr');
@@ -147,14 +234,44 @@ function extractEntities({ allianceId } = {}) {
     seen += 1;
   }
 
+  // Captured even when nothing matched: "zero rows" is unactionable without
+  // knowing which page we actually landed on and what it held.
+  const allAnchors = [...document.querySelectorAll('a[href]')];
+  const hrefs = allAnchors.map((a) => a.getAttribute('href') || '');
+  const interesting = hrefs.filter((h) => /alliance|lord/i.test(h)).slice(0, 6);
+
   return {
     alliances: [...alliances.values()].slice(0, 500),
     players: [...players.values()].slice(0, 500),
+    meta: {
+      url: location.href,
+      title: (document.title || '').slice(0, 120),
+      anchors: allAnchors.length,
+      allianceCards: document.querySelectorAll('.alliance-item').length,
+      lordEntries: document.querySelectorAll('.lord-entry').length,
+      sample: interesting.length ? interesting : hrefs.slice(0, 6),
+    },
   };
 }
 
 function failure(status, detail) {
   return { version: 'v1', status, detail, alliances: [], players: [] };
+}
+
+/**
+ * Turns "nothing was found" into something diagnosable: which page was
+ * actually reached, what it was titled, and which links it exposed. Without
+ * this, a zero-row result says nothing about whether the URL, the login, or
+ * the parser is at fault.
+ */
+function describePage(meta) {
+  if (!meta) return '';
+  const sample = (meta.sample || []).slice(0, 6).join(', ');
+  return (
+    ` Landed on ${meta.url} (title "${meta.title}") with ${meta.allianceCards} ` +
+    `alliance cards, ${meta.lordEntries} member rows and ${meta.anchors} links. ` +
+    `Sample hrefs: ${sample || 'none'}.`
+  );
 }
 
 async function getRoster() {
@@ -168,8 +285,7 @@ async function getRoster() {
   let crawled;
   try {
     crawled = await withAuthedPage(async (page) => {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-      await page.waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS }).catch(() => {});
+      await open(page, url);
 
       if (isLoginPage(page)) {
         const err = new Error('Redirected to the login page before any data was read');
@@ -179,13 +295,15 @@ async function getRoster() {
 
       const fromServer = await page.evaluate(extractEntities, { allianceId: null });
       const alliances = fromServer.alliances;
+      const serverMeta = fromServer.meta || null;
       const players = [...fromServer.players];
       const knownPlayers = new Set(players.map((p) => p.id));
 
+      const crawlDetail = shouldCrawlAlliances();
       const limit = maxAlliances();
       const deadline = Date.now() + crawlBudgetMs();
-      const targets = alliances.slice(0, limit);
-      const truncated = alliances.length > targets.length;
+      const targets = crawlDetail ? alliances.slice(0, limit) : [];
+      const truncated = crawlDetail && alliances.length > targets.length;
       let authExpired = false;
       let budgetHit = false;
       let reached = 0;
@@ -197,13 +315,7 @@ async function getRoster() {
           break;
         }
         try {
-          await page.goto(allianceUrl(alliance.id), {
-            waitUntil: 'domcontentloaded',
-            timeout: NAV_TIMEOUT_MS,
-          });
-          await page
-            .waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS })
-            .catch(() => {});
+          await open(page, allianceUrl(alliance.id));
 
           // The session can lapse mid-crawl; stop rather than record a page of
           // login markup as if it were roster data.
@@ -243,7 +355,7 @@ async function getRoster() {
         p.index = i + 1;
       });
 
-      return { alliances, players, truncated, reached, authExpired, budgetHit };
+      return { alliances, players, truncated, reached, authExpired, budgetHit, serverMeta };
     });
   } catch (err) {
     if (err.code === 'NOT_CONFIGURED' || err.code === 'NO_PLAYWRIGHT') {
@@ -264,6 +376,7 @@ async function getRoster() {
     truncated = false,
     authExpired = false,
     budgetHit = false,
+    serverMeta = null,
   } = crawled;
 
   if (authExpired && alliances.length === 0 && players.length === 0) {
@@ -284,15 +397,19 @@ async function getRoster() {
   }
   if (authExpired) notes.push('The session lapsed partway through, so some alliances were skipped.');
 
+  if (empty) {
+    console.warn('[ROSTER] parse_empty -', describePage(serverMeta));
+  }
+
   return {
     version: 'v1',
     status: empty ? 'parse_empty' : 'ok',
     detail: empty
-      ? 'The pages loaded but no alliance or player links were recognised on them.'
+      ? `No alliance or player links were recognised.${describePage(serverMeta)}`
       : notes.length
         ? notes.join(' ')
         : null,
-    server: { id: serverId(), url: sourceUrl() },
+    server: { id: serverId(), url },
     alliances: alliances.slice(0, MAX_ROWS),
     players: players.slice(0, MAX_ROWS),
     crawledAt: new Date().toISOString(),
