@@ -2,6 +2,10 @@ const prisma = require('./db');
 const { CONFIG } = require('./config');
 
 const AUTO_REFRESH_KEY = `sheets_auto_refresh:${CONFIG.DISCORD.GUILD_ID}`;
+const HOME_VERSION_KEY = `home_version:${CONFIG.DISCORD.GUILD_ID}`;
+
+const HOME_VERSIONS = ['v1', 'v2'];
+const DEFAULT_HOME_VERSION = 'v1';
 
 const DEFAULTS = {
   enabled: true,
@@ -53,9 +57,49 @@ async function setAutoRefreshConfig(patch = {}) {
   return next;
 }
 
+/** Unknown values fall back to the default rather than reaching the page. */
+function normalizeHomeVersion(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return HOME_VERSIONS.includes(v) ? v : DEFAULT_HOME_VERSION;
+}
+
+function parseStoredVersion(raw) {
+  try {
+    return normalizeHomeVersion(JSON.parse(raw));
+  } catch {
+    return normalizeHomeVersion(raw);
+  }
+}
+
+async function getHomeVersionConfig() {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: HOME_VERSION_KEY } });
+    if (!row) return DEFAULT_HOME_VERSION;
+    return parseStoredVersion(row.value);
+  } catch (err) {
+    console.warn('[SETTINGS] Could not read home version, using default:', err.message);
+    return DEFAULT_HOME_VERSION;
+  }
+}
+
+async function setHomeVersionConfig(version) {
+  const next = normalizeHomeVersion(version);
+  await prisma.setting.upsert({
+    where: { key: HOME_VERSION_KEY },
+    create: { key: HOME_VERSION_KEY, value: JSON.stringify(next) },
+    update: { value: JSON.stringify(next) },
+  });
+  console.log(`[SETTINGS] Public home page will render ${next}.`);
+  return next;
+}
+
 module.exports = {
   getAutoRefreshConfig,
   setAutoRefreshConfig,
+  getHomeVersionConfig,
+  setHomeVersionConfig,
+  HOME_VERSIONS,
+  DEFAULT_HOME_VERSION,
   MIN_INTERVAL_MS,
   MAX_INTERVAL_MS,
   DEFAULTS,

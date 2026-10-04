@@ -9,6 +9,7 @@
     "deploy:commands": "node src/bot/deploy-commands.js",
     "migrate": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
+    "install:browsers": "playwright install --with-deps chromium",
     "postinstall": "prisma generate"
   },
   "keywords": [],
@@ -21,7 +22,7 @@
     "dotenv": "^17.4.2",
     "express": "^4.21.2",
     "node-cron": "^3.0.3",
+    "playwright": "^1.63.0",
     "prisma": "^6.7.0"
-  },
-  "devDependencies": {}
+  }
 }
