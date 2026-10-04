@@ -46,6 +46,11 @@ const BACKFILL_LIMIT = envInt('ROSTER_BACKFILL_LIMIT', 30);
 const REFRESH_MS = envInt('ROSTER_REFRESH_MINUTES', 240) * 60 * 1000;
 /** How long discovered dates are reused before asking the source again. */
 const DISCOVERY_TTL_MS = envInt('ROSTER_DISCOVERY_TTL_MS', 30 * 60 * 1000);
+/** The server page is capped; alliance pages complete the current roster. */
+const CRAWL_ALLIANCES = !String(process.env.ROSTER_CRAWL_ALLIANCES || '').trim()
+  ? true
+  : envFlag('ROSTER_CRAWL_ALLIANCES');
+const CRAWL_ALLIANCE_LIMIT = envInt('ROSTER_CRAWL_ALLIANCE_LIMIT', 100);
 /**
  * How far a read may fall below what is stored before it is thrown away.
  *
@@ -174,6 +179,44 @@ function credentialError(message) {
   const err = new Error(message);
   err.code = 'BAD_CREDENTIALS';
   return err;
+}
+
+function allianceUrl(id, iso) {
+  const url = new URL(`/alliance/${id}`, BASE);
+  url.searchParams.set('minimum_power', String(minimumPower()));
+  if (iso) url.searchParams.set('selected_date', iso);
+  return url.toString();
+}
+
+/**
+ * The server leaderboard exposes only its first page of lords. Read each
+ * alliance page for the newest snapshot so the homepage is not capped at the
+ * source leaderboard's 300 rows.
+ */
+async function crawlAllianceMembers(page, entry, iso) {
+  if (!CRAWL_ALLIANCES) return entry;
+
+  const targets = entry.alliances
+    .filter((alliance) => /^\d+$/.test(String(alliance.id)))
+    .slice(0, CRAWL_ALLIANCE_LIMIT);
+  const playersById = new Map(entry.players.map((player) => [player.id, player]));
+
+  for (const alliance of targets) {
+    await open(page, allianceUrl(alliance.id, iso));
+    if (isLoginPage(page) || redirectedElsewhere(page, allianceUrl(alliance.id, iso))) {
+      throw credentialError('The session lapsed while reading alliance members.');
+    }
+
+    const detail = await page.evaluate(extractEntities, { allianceId: alliance.id });
+    for (const player of detail.players) {
+      if (!playersById.has(player.id)) {
+        playersById.set(player.id, player);
+      }
+    }
+  }
+
+  entry.players = [...playersById.values()];
+  return entry;
 }
 
 async function ensureServer() {
@@ -422,15 +465,20 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
         dates = state.available;
         discovery = { at: Date.now(), dates };
 
-        const iso = state.active || dates?.[dates.length - 1] || todayIso();
-        latest = {
+        const iso = state.active;
+        if (!iso) {
+          throw new Error(
+            'The source did not identify the active snapshot date; refusing to save an unverified current roster.',
+          );
+        }
+        latest = await crawlAllianceMembers(page, {
           iso,
           url,
           alliances: rankInOrder(extracted.alliances),
           players: rankInOrder(extracted.players),
-          status: state.active ? 'COMPLETE' : 'UNVERIFIED_DATE',
+          status: 'COMPLETE',
           meta: extracted.meta,
-        };
+        }, iso);
       }
 
       const known = dates || [];
@@ -451,12 +499,15 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
         const state = await page.evaluate(readDateState);
         const extracted = await page.evaluate(extractEntities, { allianceId: null });
         const empty = !extracted.alliances.length && !extracted.players.length;
+        if (!state.active || state.active !== iso) {
+          continue;
+        }
         targets.push({
           iso,
           url,
           alliances: rankInOrder(extracted.alliances),
           players: rankInOrder(extracted.players),
-          status: empty ? 'COMPLETE' : state.active && state.active !== iso ? 'UNVERIFIED_DATE' : 'COMPLETE',
+          status: 'COMPLETE',
           meta: extracted.meta,
           empty,
         });

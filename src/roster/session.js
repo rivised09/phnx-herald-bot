@@ -296,8 +296,33 @@ async function withAuthedPage(work) {
       // Credentials are only demanded when a login is actually needed: a
       // session that is still valid must keep working on its own.
       const loginNow = async () => {
-        await login(page, credentials());
-        await saveAccountIndex();
+        const total = accountCount();
+        let lastError;
+
+        for (let attempt = 0; attempt < Math.max(1, total); attempt += 1) {
+          try {
+            await login(page, credentials());
+            // A successful form submission commonly lands on the public home
+            // page. Probe the protected server route before accepting cookies.
+            const target = probeUrl();
+            await page.goto(target, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT_MS });
+            if (!sessionAccepted(page, target)) {
+              const err = new Error(
+                'CallOfStats accepted the form but denied access to the protected server route.',
+              );
+              err.code = 'SOURCE_ACCESS_DENIED';
+              throw err;
+            }
+            await saveAccountIndex();
+            return;
+          } catch (err) {
+            lastError = err;
+            if (attempt + 1 >= total) break;
+            rotateCredentials();
+          }
+        }
+
+        throw lastError || new Error('No CallOfStats account is configured.');
       };
 
       try {
@@ -309,7 +334,7 @@ async function withAuthedPage(work) {
         }
       } catch (err) {
         // A stale or malformed session should trigger a fresh login, not fail.
-        if (err.code === 'BAD_CREDENTIALS') throw err;
+        if (err.code === 'BAD_CREDENTIALS' || err.code === 'SOURCE_ACCESS_DENIED') throw err;
         await loginNow();
       }
 

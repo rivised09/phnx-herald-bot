@@ -28,10 +28,12 @@ const { withAuthedPage, BASE } = require('./session');
  */
 
 const DEFAULT_SERVER_ID = '973';
-const DEFAULT_MAX_ALLIANCES = 50;
+const DEFAULT_MAX_ALLIANCES = 100;
 const MAX_ROWS = 500;
 const NAV_TIMEOUT_MS = 25000;
 const IDLE_TIMEOUT_MS = 8000;
+const NAV_ATTEMPTS = 3;
+const NAV_RETRY_DELAY_MS = 3000;
 /** Allowance for client-rendered pages before we read the DOM. */
 const RENDER_TIMEOUT_MS = 8000;
 /**
@@ -79,7 +81,7 @@ function maxAlliances() {
  */
 function crawlBudgetMs() {
   const parsed = parseInt(process.env.ROSTER_V1_BUDGET_MS || '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 25000;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 300000;
 }
 
 /**
@@ -90,7 +92,8 @@ function crawlBudgetMs() {
  * Off by default: enable once we need fields only the detail pages carry.
  */
 function shouldCrawlAlliances() {
-  return /^(1|true|yes|on)$/i.test(String(process.env.CALLOFSTATS_CRAWL_ALLIANCES || ''));
+  const configured = String(process.env.CALLOFSTATS_CRAWL_ALLIANCES || '').trim();
+  return configured === '' || /^(1|true|yes|on)$/i.test(configured);
 }
 
 function allianceUrl(id) {
@@ -131,9 +134,20 @@ function redirectedElsewhere(page, url) {
  * page eventually contains.
  */
 async function open(page, url) {
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-  await page.waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS }).catch(() => {});
-  await page.waitForSelector(DATA_SELECTOR, { timeout: RENDER_TIMEOUT_MS }).catch(() => {});
+  let lastError;
+  for (let attempt = 1; attempt <= NAV_ATTEMPTS; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+      await page.waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS }).catch(() => {});
+      await page.waitForSelector(DATA_SELECTOR, { timeout: RENDER_TIMEOUT_MS }).catch(() => {});
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt === NAV_ATTEMPTS) break;
+      await new Promise((resolve) => setTimeout(resolve, NAV_RETRY_DELAY_MS * attempt));
+    }
+  }
+  throw lastError;
 }
 
 /**

@@ -136,6 +136,7 @@ async function getStoredRoster() {
     snapshot: {
       date: new Date(snapshot.snapshotDate).toISOString().slice(0, 10),
       ingestedAt: new Date(snapshot.createdAt).toISOString(),
+      staleDays,
     },
     guild: null,
   };
