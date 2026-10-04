@@ -417,4 +417,15 @@ async function getRoster() {
   };
 }
 
-module.exports = { getRoster, extractEntities };
+module.exports = {
+  getRoster,
+  extractEntities,
+  serverId,
+  sourceUrl,
+  open,
+  isLoginPage,
+  DATA_SELECTOR,
+  NAV_TIMEOUT_MS,
+  IDLE_TIMEOUT_MS,
+  RENDER_TIMEOUT_MS,
+};

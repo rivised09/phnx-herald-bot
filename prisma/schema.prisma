@@ -62,3 +62,113 @@ model Setting {
 
   @@map("settings")
 }
+
+/// A server we ingest from the stats site (e.g. #973).
+model SourceServer {
+  id           String          @id @default(uuid())
+  serverNumber Int             @unique @map("server_number")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  snapshots    RosterSnapshot[]
+  alliances    Alliance[]
+  lords        Lord[]
+
+  @@map("source_servers")
+}
+
+/// One ingest run for a server on a particular date.
+///
+/// This is the unit of work for incremental sync: `(serverId, snapshotDate)`
+/// is unique, so "which dates are missing?" is a single query and re-ingesting
+/// an existing date is an upsert rather than a duplicate.
+model RosterSnapshot {
+  id            String   @id @default(uuid())
+  serverId      String   @map("server_id")
+  snapshotDate  DateTime @db.Date @map("snapshot_date")
+  minimumPower  Int      @default(0) @map("minimum_power")
+  lordCount     Int      @default(0) @map("lord_count")
+  allianceCount Int      @default(0) @map("alliance_count")
+  sourceUrl     String?  @map("source_url")
+  status        String   @default("COMPLETE") @db.VarChar(20)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  server        SourceServer        @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  allianceRows  AllianceSnapshot[]
+  lordRows      LordSnapshot[]
+
+  @@unique([serverId, snapshotDate])
+  @@index([serverId, snapshotDate(sort: Desc)])
+  @@map("roster_snapshots")
+}
+
+/// Stable identity of an alliance within a server, independent of any date.
+model Alliance {
+  id        String   @id @default(uuid())
+  serverId  String   @map("server_id")
+  /// Exactly as the source renders it, e.g. "[PHW2] Phoenix of the War".
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  server    SourceServer        @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  snapshots AllianceSnapshot[]
+  lordRows  LordSnapshot[]
+
+  @@unique([serverId, name])
+  @@map("alliances")
+}
+
+/// Stable identity of a player. `sourceId` is the numeric lord id from the
+/// site and is the only durable key a player has - names change.
+model Lord {
+  id        String   @id @default(uuid())
+  serverId  String   @map("server_id")
+  sourceId  BigInt   @map("source_id")
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  server    SourceServer    @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  snapshots LordSnapshot[]
+
+  @@unique([serverId, sourceId])
+  @@map("lords")
+}
+
+/// An alliance's figures on one date. Affiliation history lives here rather
+/// than on `Lord`, because a player can change alliance between dates.
+model AllianceSnapshot {
+  id          String @id @default(uuid())
+  snapshotId  String @map("snapshot_id")
+  allianceId  String @map("alliance_id")
+  /// BigInt: source values reach into the tens of billions.
+  power       BigInt
+  memberCount Int    @default(0) @map("member_count")
+  rank        Int?
+
+  snapshot    RosterSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  alliance    Alliance       @relation(fields: [allianceId], references: [id], onDelete: Cascade)
+
+  @@unique([snapshotId, allianceId])
+  @@map("alliance_snapshots")
+}
+
+/// A player's figures on one date, attributed to the alliance they were in.
+model LordSnapshot {
+  id         String  @id @default(uuid())
+  snapshotId String  @map("snapshot_id")
+  lordId     String  @map("lord_id")
+  allianceId String? @map("alliance_id")
+  power      BigInt
+  rank       Int?
+
+  snapshot   RosterSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  lord       Lord           @relation(fields: [lordId], references: [id], onDelete: Cascade)
+  alliance   Alliance?      @relation(fields: [allianceId], references: [id], onDelete: SetNull)
+
+  @@unique([snapshotId, lordId])
+  @@index([allianceId])
+  @@map("lord_snapshots")
+}

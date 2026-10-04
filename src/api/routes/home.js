@@ -1,5 +1,6 @@
 const express = require('express');
-const { getRoster, invalidate, HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('../../roster');
+const { getRoster, requestSync, invalidate, HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('../../roster');
+const { getSyncState } = require('../../roster/ingest');
 const { getHomeVersionConfig } = require('../../settings');
 const { requireAccessCode } = require('../../auth/accessCode');
 
@@ -31,10 +32,30 @@ function homeRouter() {
     asyncHandler(async (req, res) => {
       const requested = req.query.version;
       const version = requested ? String(requested).toLowerCase() : await getHomeVersionConfig();
-      const data = await getRoster(version, { force: req.query.refresh === '1' });
+      const force = req.query.refresh === '1';
+
+      // A manual refresh asks the scheduler to resync in the background rather
+      // than scraping inside the request: a backfill batch can take far longer
+      // than a gateway is willing to wait, and the answer the visitor wants is
+      // already in the database.
+      if (force) requestSync('home_refresh');
+
+      const data = await getRoster(version, { force });
+      if (force && version === 'v1') {
+        data.sync = await getSyncState();
+      }
 
       res.set('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
       res.json(data);
+    }),
+  );
+
+  /** Non-authed progress view so the UI can show whether a sync is in flight. */
+  router.get(
+    '/sync',
+    asyncHandler(async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      res.json(await getSyncState());
     }),
   );
 

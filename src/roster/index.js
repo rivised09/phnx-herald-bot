@@ -1,28 +1,33 @@
-const { getHomeVersionConfig, HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('../settings');
+const { HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('../settings');
 
 /**
  * Dispatcher for the public home page roster.
  *
- * v1 and v2 are separate modules with separate sources; this file only decides
- * which one to call and caches the result briefly so a burst of visitors does
- * not turn into a burst of scrapes.
+ * v1 and v2 have separate sources; this file only decides which one to call
+ * and caches the result briefly so a burst of visitors does not turn into a
+ * burst of work.
+ *
+ * v1 reads snapshots that ./ingest wrote ahead of time, so a request never
+ * launches a browser. That also means the cache is a minor optimisation
+ * rather than a scrape shield, and it is kept short so a newly ingested date
+ * reaches visitors quickly. Filling the database is the scheduler's job; a
+ * visitor asking for fresh data only triggers a background run.
  */
 
-/**
- * v1 launches a browser and walks a chain of pages (server, then each
- * alliance), so a refresh costs real seconds of Chromium time. It is cached
- * far longer than v2 (a cheap sheet read) to avoid crawling for every visitor.
- * Override with ROSTER_V1_TTL_MS if the server is large and the chain is slow.
- */
-const envTtl = parseInt(process.env.ROSTER_V1_TTL_MS || '', 10);
 const TTL_MS = {
-  v1: Number.isFinite(envTtl) && envTtl > 0 ? envTtl : 30 * 60 * 1000,
+  v1: envInt('ROSTER_V1_TTL_MS', 60 * 1000),
   v2: 60 * 1000,
 };
+
+function envInt(name, fallback) {
+  const parsed = parseInt(process.env[name] || '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 const cache = new Map();
 
 const LOADERS = {
-  v1: () => require('./v1').getRoster(),
+  v1: () => require('./store').getStoredRoster(),
   v2: () => require('./v2').getRoster(),
 };
 
@@ -46,6 +51,7 @@ async function getRoster(version, { force = false } = {}) {
       version: v,
       status: 'fetch_failed',
       detail: err.message,
+      alliances: [],
       players: [],
     };
   }
@@ -54,8 +60,23 @@ async function getRoster(version, { force = false } = {}) {
   return { ...value, cached: false };
 }
 
+/**
+ * Ask for a background resync.
+ *
+ * Fire-and-forget: the caller wants the page to improve on its next load, not
+ * to wait on Chromium. runSync is self-guarding, so repeated calls while one
+ * is in flight are simply ignored.
+ */
+function requestSync(reason = 'request') {
+  const { runSync } = require('./ingest');
+  return runSync({ reason }).catch((err) => {
+    console.warn('[ROSTER] requested sync failed:', err.message);
+    return null;
+  });
+}
+
 function invalidate() {
   cache.clear();
 }
 
-module.exports = { getRoster, invalidate, HOME_VERSIONS, DEFAULT_HOME_VERSION };
+module.exports = { getRoster, requestSync, invalidate, HOME_VERSIONS, DEFAULT_HOME_VERSION };

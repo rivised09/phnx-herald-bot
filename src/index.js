@@ -12,6 +12,7 @@ const { setClient, ensureHeaders, syncMembers, listTasksAndArchive, isConfigured
 const { updateTasksPanel } = require('./bot/tasks/task-panel');
 const { ensureAssignedPings, checkSheetAssignments } = require('./bot/tasks/task-pings');
 const { getAutoRefreshConfig } = require('./settings');
+const { startSyncScheduler } = require('./roster/ingest');
 
 validateEnv();
 
@@ -27,6 +28,10 @@ const app = createApp({ client });
 const server = app.listen(CONFIG.APP.PORT, () => {
   console.log(`[API] Phoenix Herald API listening on port ${CONFIG.APP.PORT}`);
 });
+
+// Ingest runs on its own schedule, deliberately independent of Discord: the
+// home roster must still fill in if the bot fails to log in.
+startSyncScheduler();
 
 let shuttingDown = false;
 
