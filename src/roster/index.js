@@ -9,11 +9,14 @@ const { getHomeVersionConfig, HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('.
  */
 
 /**
- * v1 launches a browser to scrape, so it is cached far longer than v2 (a
- * cheap sheet read) to avoid launching Chromium for every visitor.
+ * v1 launches a browser and walks a chain of pages (server, then each
+ * alliance), so a refresh costs real seconds of Chromium time. It is cached
+ * far longer than v2 (a cheap sheet read) to avoid crawling for every visitor.
+ * Override with ROSTER_V1_TTL_MS if the server is large and the chain is slow.
  */
+const envTtl = parseInt(process.env.ROSTER_V1_TTL_MS || '', 10);
 const TTL_MS = {
-  v1: 10 * 60 * 1000,
+  v1: Number.isFinite(envTtl) && envTtl > 0 ? envTtl : 30 * 60 * 1000,
   v2: 60 * 1000,
 };
 const cache = new Map();
