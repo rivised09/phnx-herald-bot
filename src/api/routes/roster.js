@@ -14,9 +14,9 @@ function rosterRouter() {
     }
   });
 
-  router.get('/alliances/:name', async (req, res, next) => {
+  router.get('/alliances/:id', async (req, res, next) => {
     try {
-      const data = await getAllianceDetail(req.params.name);
+      const data = await getAllianceDetail(req.params.id);
       if (!data) return res.status(404).json({ error: 'Alliance not found' });
       return res.json(data);
     } catch (err) {

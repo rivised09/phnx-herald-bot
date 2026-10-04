@@ -93,7 +93,7 @@ async function getStoredRoster() {
     if (power) stats.Power = power;
     if (row.memberCount) stats.Members = String(row.memberCount);
     return {
-      id: row.alliance.name,
+      id: row.alliance.id,
       name: row.alliance.name,
       rank: row.rank,
       stats,
@@ -177,12 +177,13 @@ async function getPlayerDetail(sourceId) {
     where: { serverNumber: Number(serverId()) },
   });
   if (!server) return null;
-  const snapshot = await latestSnapshot(server.id);
-  if (!snapshot) return null;
-
   const row = await prisma.lordSnapshot.findFirst({
-    where: { snapshotId: snapshot.id, lord: { sourceId: BigInt(sourceId) } },
-    include: { lord: true, alliance: true, achievements: true },
+    where: {
+      lord: { serverId: server.id, sourceId: BigInt(sourceId) },
+      snapshot: { serverId: server.id, status: 'COMPLETE' },
+    },
+    include: { lord: true, alliance: true, achievements: true, snapshot: true },
+    orderBy: { snapshot: { snapshotDate: 'desc' } },
   });
   if (!row) return null;
   return {
@@ -192,7 +193,7 @@ async function getPlayerDetail(sourceId) {
     power: formatStat(row.power),
     avatar: row.avatarUrl || null,
     alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
-    snapshotDate: snapshot.snapshotDate.toISOString().slice(0, 10),
+    snapshotDate: row.snapshot.snapshotDate.toISOString().slice(0, 10),
     achievements: row.achievements.map((item) => ({
       name: item.name,
       progress: item.progress?.toString() || null,
@@ -202,28 +203,32 @@ async function getPlayerDetail(sourceId) {
   };
 }
 
-async function getAllianceDetail(name) {
+async function getAllianceDetail(id) {
   const server = await prisma.sourceServer.findUnique({
     where: { serverNumber: Number(serverId()) },
   });
   if (!server) return null;
-  const snapshot = await latestSnapshot(server.id);
-  if (!snapshot) return null;
-
   const alliance = await prisma.alliance.findFirst({
-    where: { serverId: server.id, name },
+    where: { serverId: server.id, id },
   });
   if (!alliance) return null;
   const row = await prisma.allianceSnapshot.findFirst({
-    where: { snapshotId: snapshot.id, allianceId: alliance.id },
+    where: {
+      allianceId: alliance.id,
+      snapshot: { serverId: server.id, status: 'COMPLETE' },
+    },
+    include: { snapshot: true },
+    orderBy: { snapshot: { snapshotDate: 'desc' } },
   });
+  if (!row) return null;
+  const snapshot = row.snapshot;
   const members = await prisma.lordSnapshot.findMany({
     where: { snapshotId: snapshot.id, allianceId: alliance.id },
     include: { lord: true },
     orderBy: { rank: 'asc' },
   });
   return {
-    id: alliance.name,
+    id: alliance.id,
     name: alliance.name,
     rank: row?.rank || null,
     power: formatStat(row?.power),
