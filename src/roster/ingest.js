@@ -18,8 +18,9 @@ const {
  *
  *   - one browser context covers every date in a run (launching Chromium per
  *     date would roughly double the cost of a batch),
- *   - a run only fetches dates we do not already have, oldest first, capped at
- *     a small batch so a cold start cannot outlive Railway's request timeout,
+ *   - a run always prioritises the newest available date, then works backward
+ *     toward the last verified snapshot, capped at a small batch so a cold
+ *     start cannot outlive Railway's request timeout,
  *   - a date that is already stored and current costs nothing at all.
  *
  * STATUS VALUES (written to roster_snapshots.status):
@@ -231,7 +232,10 @@ async function ensureServer() {
 /** date (ISO) -> when that snapshot was last written. */
 async function loadExisting(server) {
   const rows = await prisma.rosterSnapshot.findMany({
-    where: { serverId: server.id },
+    // Unverified rows are evidence of a failed read, not completed work. If
+    // they enter this map, the planner can stop retrying the current date
+    // forever while the public page correctly ignores that same row.
+    where: { serverId: server.id, status: 'COMPLETE' },
     select: { snapshotDate: true, updatedAt: true },
     orderBy: { snapshotDate: 'desc' },
   });
@@ -398,9 +402,14 @@ function discoveryFresh() {
  */
 function planWork(cachedDates, existing) {
   const haveDates = Array.isArray(cachedDates) && cachedDates.length > 0;
+  const newestAvailable = haveDates ? cachedDates[cachedDates.length - 1] : null;
+  const newestVerified = existing.size ? [...existing.keys()].sort().at(-1) : null;
   return {
     haveDates,
-    needLatest: !haveDates || isStale(existing),
+    needLatest:
+      !haveDates ||
+      isStale(existing) ||
+      Boolean(newestAvailable && newestAvailable !== newestVerified),
     needBackfill:
       haveDates && cachedDates.slice(-BACKFILL_LIMIT).some((iso) => !existing.has(iso)),
   };
@@ -502,7 +511,9 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
       }
 
       const eligible = known.slice(-BACKFILL_LIMIT);
-      const missing = eligible.filter((iso) => !existing.has(iso) && (!latest || iso !== latest.iso));
+      const missing = eligible
+        .filter((iso) => !existing.has(iso) && (!latest || iso !== latest.iso))
+        .reverse();
       const backfill = missing.slice(0, Math.max(0, limit));
 
       for (const iso of backfill) {
