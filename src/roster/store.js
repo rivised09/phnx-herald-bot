@@ -46,6 +46,24 @@ function failure(status, detail) {
   };
 }
 
+async function historicalAvatarMap(serverIdValue, lordIds) {
+  if (!lordIds.length) return new Map();
+  const rows = await prisma.lordSnapshot.findMany({
+    where: {
+      lordId: { in: lordIds },
+      avatarUrl: { not: null },
+      snapshot: { serverId: serverIdValue, status: 'COMPLETE' },
+    },
+    select: { lordId: true, avatarUrl: true },
+    orderBy: { snapshot: { snapshotDate: 'desc' } },
+  });
+  const result = new Map();
+  for (const row of rows) {
+    if (!result.has(row.lordId)) result.set(row.lordId, row.avatarUrl);
+  }
+  return result;
+}
+
 async function getStoredRoster() {
   let number;
   let url;
@@ -86,6 +104,10 @@ async function getStoredRoster() {
     (a, b) => (a.rank ?? 0) - (b.rank ?? 0),
   );
   const lordRows = [...snapshot.lordRows].sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+  const avatarByLord = await historicalAvatarMap(
+    server.id,
+    lordRows.slice(0, MAX_ROWS).map((row) => row.lordId),
+  );
 
   const alliances = allianceRows.slice(0, MAX_ROWS).map((row) => {
     const stats = {};
@@ -110,7 +132,7 @@ async function getStoredRoster() {
       name: row.lord.name,
       index: row.rank,
       allianceId: row.alliance ? row.alliance.name : null,
-      avatar: row.avatarUrl || null,
+      avatar: row.avatarUrl || avatarByLord.get(row.lordId) || null,
       stats,
     };
   });
@@ -186,12 +208,13 @@ async function getPlayerDetail(sourceId) {
     orderBy: { snapshot: { snapshotDate: 'desc' } },
   });
   if (!row) return null;
+  const avatarByLord = await historicalAvatarMap(server.id, [row.lordId]);
   return {
     id: row.lord.sourceId.toString(),
     name: row.lord.name,
     rank: row.rank,
     power: formatStat(row.power),
-    avatar: row.avatarUrl || null,
+    avatar: row.avatarUrl || avatarByLord.get(row.lordId) || null,
     alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
     snapshotDate: row.snapshot.snapshotDate.toISOString().slice(0, 10),
     achievements: row.achievements.map((item) => ({

@@ -42,7 +42,6 @@ function envFlag(name) {
 /** How many missing dates a single run will fill in. */
 const BACKFILL_BATCH = envInt('ROSTER_BACKFILL_BATCH', 3);
 /** How many of the newest dates are eligible for backfill at all. */
-const BACKFILL_LIMIT = envInt('ROSTER_BACKFILL_LIMIT', 30);
 /** Re-read the newest date at least this often. */
 const REFRESH_MS = envInt('ROSTER_REFRESH_MINUTES', 240) * 60 * 1000;
 /** How long discovered dates are reused before asking the source again. */
@@ -315,6 +314,23 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
     const lordIds = new Map(existing.map((row) => [row.sourceId.toString(), row.id]));
     const known = new Map(existing.map((row) => [row.sourceId.toString(), row.name]));
 
+    // A roster page often omits the profile image for players who have not
+    // changed it recently. Carry the newest known image across snapshot dates
+    // so a null scrape does not make an established profile disappear.
+    const historicalLords = await tx.lordSnapshot.findMany({
+      where: {
+        lordId: { in: [...lordIds.values()] },
+        avatarUrl: { not: null },
+        snapshot: { serverId: server.id, status: 'COMPLETE' },
+      },
+      select: { lordId: true, avatarUrl: true, snapshot: { select: { snapshotDate: true } } },
+      orderBy: { snapshot: { snapshotDate: 'desc' } },
+    });
+    const historicalAvatars = new Map();
+    for (const row of historicalLords) {
+      if (!historicalAvatars.has(row.lordId)) historicalAvatars.set(row.lordId, row.avatarUrl);
+    }
+
     const fresh = players.filter((p) => !lordIds.has(p.id));
     if (fresh.length) {
       await tx.lord.createMany({
@@ -366,7 +382,7 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
             allianceId: entity.allianceId ? allianceIds.get(entity.allianceId) ?? null : null,
             power: toBigIntStat(entity.stats?.Power),
             rank: entity.rank ?? i + 1,
-            avatarUrl: entity.avatar || previous?.avatarUrl || null,
+            avatarUrl: entity.avatar || previous?.avatarUrl || historicalAvatars.get(lordId) || null,
             scannedAt: previous?.scannedAt || null,
           };
         }),
@@ -411,7 +427,7 @@ function planWork(cachedDates, existing) {
       isStale(existing) ||
       Boolean(newestAvailable && newestAvailable !== newestVerified),
     needBackfill:
-      haveDates && cachedDates.slice(-BACKFILL_LIMIT).some((iso) => !existing.has(iso)),
+      haveDates && cachedDates.some((iso) => !existing.has(iso)),
   };
 }
 
@@ -510,8 +526,10 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
         throw new Error('The source offered no dates to backfill from.');
       }
 
-      const eligible = known.slice(-BACKFILL_LIMIT);
-      const missing = eligible
+      // Keep the newest date first, but do not discard older dates from the
+      // queue. The batch limit controls work per run; every discovered date
+      // must remain eligible for a later run.
+      const missing = known
         .filter((iso) => !existing.has(iso) && (!latest || iso !== latest.iso))
         .reverse();
       const backfill = missing.slice(0, Math.max(0, limit));

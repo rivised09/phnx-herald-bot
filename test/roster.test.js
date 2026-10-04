@@ -108,7 +108,7 @@ check('sync planning decides when a browser is needed', () => {
     [recent30, mapWith(recent30, now), false, false],
     [recent30, mapWith(recent30, staleAt), true, false],
     [recent30, mapWith(recent30.slice(-1), now), false, true],
-    [all40, mapWith(recent30, now), false, false],
+    [all40, mapWith(recent30, now), false, true],
     [[], new Map(), true, false],
     [recent30, new Map(), true, true],
   ];
