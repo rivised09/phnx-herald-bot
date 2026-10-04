@@ -165,4 +165,83 @@ async function getStoredCounts() {
   };
 }
 
-module.exports = { getStoredRoster, getStoredCounts, formatStat };
+async function latestSnapshot(serverIdValue) {
+  return prisma.rosterSnapshot.findFirst({
+    where: { serverId: serverIdValue, status: 'COMPLETE' },
+    orderBy: { snapshotDate: 'desc' },
+  });
+}
+
+async function getPlayerDetail(sourceId) {
+  const server = await prisma.sourceServer.findUnique({
+    where: { serverNumber: Number(serverId()) },
+  });
+  if (!server) return null;
+  const snapshot = await latestSnapshot(server.id);
+  if (!snapshot) return null;
+
+  const row = await prisma.lordSnapshot.findFirst({
+    where: { snapshotId: snapshot.id, lord: { sourceId: BigInt(sourceId) } },
+    include: { lord: true, alliance: true, achievements: true },
+  });
+  if (!row) return null;
+  return {
+    id: row.lord.sourceId.toString(),
+    name: row.lord.name,
+    rank: row.rank,
+    power: formatStat(row.power),
+    avatar: row.avatarUrl || null,
+    alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
+    snapshotDate: snapshot.snapshotDate.toISOString().slice(0, 10),
+    achievements: row.achievements.map((item) => ({
+      name: item.name,
+      progress: item.progress?.toString() || null,
+      target: item.target?.toString() || null,
+      completedAt: item.completedAt?.toISOString().slice(0, 10) || null,
+    })),
+  };
+}
+
+async function getAllianceDetail(name) {
+  const server = await prisma.sourceServer.findUnique({
+    where: { serverNumber: Number(serverId()) },
+  });
+  if (!server) return null;
+  const snapshot = await latestSnapshot(server.id);
+  if (!snapshot) return null;
+
+  const alliance = await prisma.alliance.findFirst({
+    where: { serverId: server.id, name },
+  });
+  if (!alliance) return null;
+  const row = await prisma.allianceSnapshot.findFirst({
+    where: { snapshotId: snapshot.id, allianceId: alliance.id },
+  });
+  const members = await prisma.lordSnapshot.findMany({
+    where: { snapshotId: snapshot.id, allianceId: alliance.id },
+    include: { lord: true },
+    orderBy: { rank: 'asc' },
+  });
+  return {
+    id: alliance.name,
+    name: alliance.name,
+    rank: row?.rank || null,
+    power: formatStat(row?.power),
+    memberCount: row?.memberCount || members.length,
+    snapshotDate: snapshot.snapshotDate.toISOString().slice(0, 10),
+    players: members.map((item) => ({
+      id: item.lord.sourceId.toString(),
+      name: item.lord.name,
+      rank: item.rank,
+      power: formatStat(item.power),
+    })),
+  };
+}
+
+module.exports = {
+  getStoredRoster,
+  getStoredCounts,
+  getPlayerDetail,
+  getAllianceDetail,
+  formatStat,
+};

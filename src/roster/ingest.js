@@ -284,14 +284,23 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
     await tx.allianceSnapshot.deleteMany({ where: { snapshotId: snapshot.id } });
     await tx.lordSnapshot.deleteMany({ where: { snapshotId: snapshot.id } });
 
-    const allianceIds = new Map();
-    for (const entity of alliances) {
-      const row = await tx.alliance.upsert({
-        where: { serverId_name: { serverId: server.id, name: entity.name } },
-        create: { serverId: server.id, name: entity.name },
-        update: { name: entity.name },
+    const allianceNames = alliances.map((entity) => entity.name);
+    const existingAlliances = await tx.alliance.findMany({
+      where: { serverId: server.id, name: { in: allianceNames } },
+      select: { id: true, name: true },
+    });
+    const allianceIds = new Map(existingAlliances.map((row) => [row.name, row.id]));
+    const newAllianceNames = allianceNames.filter((name) => !allianceIds.has(name));
+    if (newAllianceNames.length) {
+      await tx.alliance.createMany({
+        data: newAllianceNames.map((name) => ({ serverId: server.id, name })),
+        skipDuplicates: true,
       });
-      allianceIds.set(entity.name, row.id);
+      const createdAlliances = await tx.alliance.findMany({
+        where: { serverId: server.id, name: { in: newAllianceNames } },
+        select: { id: true, name: true },
+      });
+      createdAlliances.forEach((row) => allianceIds.set(row.name, row.id));
     }
 
     const wantedSourceIds = players.map((p) => BigInt(p.id));
@@ -333,6 +342,12 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
           rank: entity.rank ?? i + 1,
           scannedAt: knownAlliances.get(allianceIds.get(entity.name)) || null,
         })),
+      }, {
+        // A full current snapshot can contain hundreds of lord rows. Keep the
+        // replacement atomic, but do not let Prisma's five-second interactive
+        // transaction default close it while the database is still working.
+        maxWait: 15000,
+        timeout: 300000,
       });
     }
 
