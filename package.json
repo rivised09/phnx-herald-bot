@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Phoenix Herald - Discord event bot and API",
   "main": "src/index.js",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "start": "npx prisma migrate deploy && node src/index.js",
     "dev": "node src/index.js",

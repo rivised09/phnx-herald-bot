@@ -58,6 +58,19 @@ function maxAlliances() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_ALLIANCES;
 }
 
+/**
+ * Wall-clock budget for one crawl.
+ *
+ * Walking the server page plus every alliance easily outlives a hosting
+ * platform's request timeout, which surfaces as a gateway error rather than a
+ * roster. Stopping on budget returns whatever was already read, and the
+ * remaining alliances are picked up by the next refresh.
+ */
+function crawlBudgetMs() {
+  const parsed = parseInt(process.env.ROSTER_V1_BUDGET_MS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 25000;
+}
+
 function allianceUrl(id) {
   return new URL(`/alliance/${id}`, BASE).toString();
 }
@@ -170,13 +183,19 @@ async function getRoster() {
       const knownPlayers = new Set(players.map((p) => p.id));
 
       const limit = maxAlliances();
+      const deadline = Date.now() + crawlBudgetMs();
       const targets = alliances.slice(0, limit);
       const truncated = alliances.length > targets.length;
       let authExpired = false;
+      let budgetHit = false;
       let reached = 0;
 
       for (const alliance of targets) {
         if (authExpired) break;
+        if (Date.now() > deadline) {
+          budgetHit = true;
+          break;
+        }
         try {
           await page.goto(allianceUrl(alliance.id), {
             waitUntil: 'domcontentloaded',
@@ -224,7 +243,7 @@ async function getRoster() {
         p.index = i + 1;
       });
 
-      return { alliances, players, truncated, reached, authExpired };
+      return { alliances, players, truncated, reached, authExpired, budgetHit };
     });
   } catch (err) {
     if (err.code === 'NOT_CONFIGURED' || err.code === 'NO_PLAYWRIGHT') {
@@ -239,7 +258,13 @@ async function getRoster() {
     return failure('fetch_failed', err.message);
   }
 
-  const { alliances = [], players = [], truncated = false, authExpired = false } = crawled;
+  const {
+    alliances = [],
+    players = [],
+    truncated = false,
+    authExpired = false,
+    budgetHit = false,
+  } = crawled;
 
   if (authExpired && alliances.length === 0 && players.length === 0) {
     return failure('auth_expired', 'The session lapsed while reading the server page.');
@@ -250,6 +275,11 @@ async function getRoster() {
   if (truncated) {
     notes.push(
       `Showing the first ${maxAlliances()} alliances only. Raise CALLOFSTATS_MAX_ALLIANCES to read more.`,
+    );
+  }
+  if (budgetHit) {
+    notes.push(
+      'The read hit its time budget, so the remaining alliances arrive on the next refresh.',
     );
   }
   if (authExpired) notes.push('The session lapsed partway through, so some alliances were skipped.');

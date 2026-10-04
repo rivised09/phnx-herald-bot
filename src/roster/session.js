@@ -95,9 +95,10 @@ async function saveSession(context) {
 }
 
 function requirePlaywright() {
+  let pw;
   try {
     // Required lazily so a bot without this feature still boots normally.
-    return require('playwright');
+    pw = require('playwright');
   } catch {
     const err = new Error(
       'Playwright is not installed. Run: npm i playwright && npx playwright install --with-deps chromium',
@@ -105,6 +106,22 @@ function requirePlaywright() {
     err.code = 'NO_PLAYWRIGHT';
     throw err;
   }
+
+  // The library and the browser binary are installed separately, and the
+  // binary is what actually costs RAM. Checking here turns "no browser" into a
+  // clear, immediate status instead of a confusing launch failure mid-scrape.
+  try {
+    const exe = pw.chromium.executablePath();
+    if (!exe || !fs.existsSync(exe)) throw new Error('browser binary missing');
+  } catch {
+    const err = new Error(
+      'The Chromium binary is not installed. Run: npm run install:browsers (npx playwright install --with-deps chromium).',
+    );
+    err.code = 'NO_PLAYWRIGHT';
+    throw err;
+  }
+
+  return pw;
 }
 
 /** True when the page shows the logged-out entry points. */
