@@ -106,6 +106,24 @@ function isLoginPage(page) {
 }
 
 /**
+ * Whether the source sent us somewhere other than the page we asked for.
+ *
+ * A session the application has stopped accepting is answered with a 303 to /
+ * rather than to /login, so testing only for the login page lets it through:
+ * the homepage then yields a handful of stray links, which get written as a
+ * roster and silently replace a good one. Landing on the requested path is the
+ * only trustworthy signal.
+ */
+function redirectedElsewhere(page, url) {
+  const strip = (value) => value.replace(/\/+$/, '');
+  try {
+    return strip(new URL(page.url()).pathname) !== strip(new URL(url).pathname);
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Navigate, then wait for roster links to actually exist.
  *
  * The stats site renders its lists client-side, so reading at domcontentloaded
@@ -142,6 +160,39 @@ function extractEntities({ allianceId } = {}) {
   // "Power: 1,234" / "ID: 25732950" -> the value that follows the label.
   const afterLabel = (el) => raw(el).replace(/^[^:]*:\s*/, '');
 
+  /**
+   * Reads a player's avatar without assuming how it is drawn.
+   *
+   * The element may be a real <img> (possibly lazy, so data-src is checked
+   * too) or a CSS background, and the source may be a root-relative path.
+   * Everything is resolved against the page URL so the database never has to
+   * care which origin produced it.
+   */
+  const avatarOf = (scope) => {
+    const el = scope.querySelector('.profile-picture');
+    if (!el) return null;
+    const absolute = (value) => {
+      if (!value) return null;
+      try {
+        return new URL(value, location.href).toString();
+      } catch {
+        return value;
+      }
+    };
+
+    const img = el.tagName === 'IMG' ? el : el.querySelector('img');
+    const fromImg = absolute(img && (img.getAttribute('src') || img.getAttribute('data-src')));
+    if (fromImg) return fromImg;
+
+    const style = getComputedStyle(el).backgroundImage || '';
+    const match = style.match(/url\((['"]?)(.*?)\1\)/);
+    if (match) return absolute(match[2]);
+
+    // A bare data attribute is the last resort; it is cheap to check and some
+    // lazy-loaders only populate it once scrolled into view.
+    return absolute(el.getAttribute('data-src') || el.getAttribute('data-avatar'));
+  };
+
   const readLord = (entry, parentAllianceId) => {
     const id = afterLabel(entry.querySelector('.lord-id')).replace(/\D/g, '');
     const name = raw(entry.querySelector('.lord-name'));
@@ -153,7 +204,13 @@ function extractEntities({ allianceId } = {}) {
     if (rank) stats['Rank'] = rank;
     if (power) stats['Power'] = power;
 
-    players.set(id, { id, name, stats, allianceId: parentAllianceId || allianceId || null });
+    players.set(id, {
+      id,
+      name,
+      stats,
+      allianceId: parentAllianceId || allianceId || null,
+      avatar: avatarOf(entry),
+    });
   };
 
   document.querySelectorAll('.alliance-item').forEach((item) => {
@@ -424,6 +481,7 @@ module.exports = {
   sourceUrl,
   open,
   isLoginPage,
+  redirectedElsewhere,
   DATA_SELECTOR,
   NAV_TIMEOUT_MS,
   IDLE_TIMEOUT_MS,

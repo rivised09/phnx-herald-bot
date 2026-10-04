@@ -25,17 +25,114 @@ const LOGIN_TIMEOUT_MS = 30000;
 /** Serialises scrapes so a burst of visitors launches one browser, not many. */
 let queue = Promise.resolve();
 
+/**
+ * Every account that may log in, in order.
+ *
+ * The source refuses service to an account it decides is scraping too hard -
+ * the session is invalidated and every page redirects home - so one blocked
+ * account must not stop the crawl. Accounts are given as parallel
+ * comma-separated lists, either in the plural keys or in the original single
+ * ones, so adding a spare needs no code change:
+ *
+ *   CALLOFSTATS_USERNAME=user1,user2,user3
+ *   CALLOFSTATS_PASSWORD=pass1,pass2,pass3
+ *
+ * Passwords are only split on commas when both lists line up; otherwise a
+ * single password that happens to contain a comma stays whole.
+ */
+function accountList() {
+  const split = (value) =>
+    String(value || '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+  const users = split(process.env.CALLOFSTATS_USERNAMES || process.env.CALLOFSTATS_USERNAME);
+  if (!users.length) return [];
+
+  const passwordRaw = String(
+    process.env.CALLOFSTATS_PASSWORDS || process.env.CALLOFSTATS_PASSWORD || '',
+  ).trim();
+  const passwords = split(passwordRaw);
+
+  const aligned =
+    passwords.length === users.length
+      ? passwords
+      : users.length === 1
+        ? [passwordRaw]
+        : passwords;
+
+  return users
+    .map((username, index) => ({ username, password: aligned[index] || '' }))
+    .filter((account) => account.password);
+}
+
+let accountIndex = 0;
+
+/**
+ * Which account is in use, remembered across restarts.
+ *
+ * The index normally sits at 0, which is fine until that first account gets
+ * flagged - at which point every process start would begin by logging in with
+ * credentials the source is already turning down, and only reach the working
+ * account after a wasted round. The index is written whenever a login
+ * succeeds, so a restart resumes on the account that last worked.
+ */
+const ACCOUNT_INDEX_KEY = 'callofstats_account_index:v1';
+let accountIndexLoaded = false;
+
+async function loadAccountIndex() {
+  if (accountIndexLoaded) return;
+  accountIndexLoaded = true;
+  try {
+    const prisma = require('../db');
+    const row = await prisma.setting.findUnique({ where: { key: ACCOUNT_INDEX_KEY } });
+    const parsed = parseInt(row?.value, 10);
+    const count = accountCount();
+    if (Number.isFinite(parsed) && count > 0) accountIndex = parsed % count;
+  } catch {
+    // Nothing remembered yet: start at the first account.
+  }
+}
+
+async function saveAccountIndex() {
+  try {
+    const prisma = require('../db');
+    await prisma.setting.upsert({
+      where: { key: ACCOUNT_INDEX_KEY },
+      create: { key: ACCOUNT_INDEX_KEY, value: String(accountIndex) },
+      update: { value: String(accountIndex) },
+    });
+  } catch (err) {
+    console.warn('[ROSTER] Could not persist the active account:', err.message);
+  }
+}
+
+function accountCount() {
+  return accountList().length;
+}
+
 function credentials() {
-  const username = String(process.env.CALLOFSTATS_USERNAME || '').trim();
-  const password = String(process.env.CALLOFSTATS_PASSWORD || '');
-  if (!username || !password) {
+  const accounts = accountList();
+  if (!accounts.length) {
     const err = new Error(
-      'CallofStats credentials are not set. Set CALLOFSTATS_USERNAME and CALLOFSTATS_PASSWORD on the bot.',
+      'CallofStats credentials are not set. Set CALLOFSTATS_USERNAME and CALLOFSTATS_PASSWORD on the bot (comma-separated to list several accounts).',
     );
     err.code = 'NOT_CONFIGURED';
     throw err;
   }
-  return { username, password };
+  return accounts[accountIndex % accounts.length];
+}
+
+/** Moves to the next account. Returns null when there is only one to move to. */
+function rotateCredentials() {
+  const accounts = accountList();
+  if (accounts.length < 2) return null;
+  accountIndex = (accountIndex + 1) % accounts.length;
+  console.log(
+    `[ROSTER] Switching to callofstats account ${accountIndex + 1} of ${accounts.length}.`,
+  );
+  return credentials();
 }
 
 /**
@@ -124,12 +221,32 @@ function requirePlaywright() {
   return pw;
 }
 
-/** True when the page shows the logged-out entry points. */
-async function isLoggedOut(page) {
-  const link = page.locator('a[href="/login"]').first();
+/**
+ * A page only an authenticated visitor is allowed to see.
+ *
+ * Kept local rather than imported from v1 to avoid a cycle (v1 requires this
+ * module), and it only needs the same server id v1 reads.
+ */
+function probeUrl() {
+  const raw = String(process.env.CALLOFSTATS_SERVER_ID || '').trim();
+  const server = /^\d+$/.test(raw) ? raw : '973';
+  return `${BASE}/server/${server}`;
+}
+
+/**
+ * Whether the source sent us to the page we asked for.
+ *
+ * A session the application has since discarded is answered with a 303 to /,
+ * so landing on the target path is the only trustworthy signal. The homepage
+ * cannot be used for this: it is public and builds its header from the mere
+ * presence of a cookie, so a dead session still looks logged in there. That
+ * false negative is why a lapsed session used to go unnoticed and the re-login
+ * meant to repair it - and the account switch meant to follow it - never
+ * actually happened.
+ */
+function sessionAccepted(page, target) {
   try {
-    await link.waitFor({ state: 'attached', timeout: 4000 });
-    return await link.isVisible();
+    return new URL(page.url()).pathname === new URL(target).pathname;
   } catch {
     return false;
   }
@@ -164,6 +281,7 @@ async function withAuthedPage(work) {
   const storageState = (await loadSession()) || undefined;
 
   const run = async () => {
+    await loadAccountIndex();
     const browser = await pw.chromium.launch({ headless: true });
     try {
       const context = await browser.newContext({
@@ -177,13 +295,16 @@ async function withAuthedPage(work) {
 
       // Credentials are only demanded when a login is actually needed: a
       // session that is still valid must keep working on its own.
-      const loginNow = async () => login(page, credentials());
+      const loginNow = async () => {
+        await login(page, credentials());
+        await saveAccountIndex();
+      };
 
       try {
-        await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
-
-        if (await isLoggedOut(page)) {
-          console.log('[ROSTER] Session expired, logging in again.');
+        const target = probeUrl();
+        await page.goto(target, { waitUntil: 'domcontentloaded' });
+        if (!sessionAccepted(page, target)) {
+          console.log('[ROSTER] Session no longer accepted, logging in again.');
           await loginNow();
         }
       } catch (err) {
@@ -209,4 +330,13 @@ function sessionPath() {
   return SESSION_FILE;
 }
 
-module.exports = { withAuthedPage, sessionPath, loadSession, saveSession, BASE };
+module.exports = {
+  withAuthedPage,
+  sessionPath,
+  loadSession,
+  saveSession,
+  requirePlaywright,
+  rotateCredentials,
+  accountCount,
+  BASE,
+};

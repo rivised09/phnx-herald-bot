@@ -66,13 +66,20 @@ async function getRoster(version, { force = false } = {}) {
  * Fire-and-forget: the caller wants the page to improve on its next load, not
  * to wait on Chromium. runSync is self-guarding, so repeated calls while one
  * is in flight are simply ignored.
+ *
+ * The detail pass follows the roster sync because it can only work on
+ * snapshots that exist. It is budget-limited and locks itself, so a refresh
+ * request on a quiet site costs a handful of queries and on a busy one simply
+ * adds another bounded slice to the backfill.
  */
 function requestSync(reason = 'request') {
   const { runSync } = require('./ingest');
-  return runSync({ reason }).catch((err) => {
-    console.warn('[ROSTER] requested sync failed:', err.message);
-    return null;
-  });
+  return runSync({ reason })
+    .then(() => require('./detail').runDetail({ reason }))
+    .catch((err) => {
+      console.warn('[ROSTER] requested sync failed:', err.message);
+      return null;
+    });
 }
 
 function invalidate() {

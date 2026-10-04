@@ -51,15 +51,23 @@ async function getRoster() {
       version: 'v2',
       status: 'fetch_failed',
       detail: err.message,
+      alliances: [],
       players: [],
     };
   }
+
+  const placeholderAlliance = rows.map((row, index) => ({
+    id: `placeholder-alliance-${index + 1}`,
+    name: row.name || `Placeholder Alliance ${index + 1}`,
+    stats: { troop: row.stats?.troop || 'Placeholder' },
+  }));
 
   return {
     version: 'v2',
     status: 'ok',
     placeholder: true,
     detail: 'Placeholder data. The v2 spreadsheet is not connected yet.',
+    alliances: placeholderAlliance,
     players: rows,
     guild: CONFIG.DISCORD.GUILD_NAME || null,
   };

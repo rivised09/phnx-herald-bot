@@ -5,6 +5,7 @@ const {
   sourceUrl,
   open,
   isLoginPage,
+  redirectedElsewhere,
   extractEntities,
 } = require('./v1');
 
@@ -45,6 +46,13 @@ const BACKFILL_LIMIT = envInt('ROSTER_BACKFILL_LIMIT', 30);
 const REFRESH_MS = envInt('ROSTER_REFRESH_MINUTES', 240) * 60 * 1000;
 /** How long discovered dates are reused before asking the source again. */
 const DISCOVERY_TTL_MS = envInt('ROSTER_DISCOVERY_TTL_MS', 30 * 60 * 1000);
+/**
+ * How far a read may fall below what is stored before it is thrown away.
+ *
+ * Both alliances and players have to shrink for a read to count as degraded -
+ * either one on its own is a change a server can genuinely make in a day.
+ */
+const SHRINK_LIMIT = 0.5;
 
 function minimumPower() {
   return envInt('ROSTER_MINIMUM_POWER', 0);
@@ -212,6 +220,24 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
       },
     });
 
+    // Avatars are often supplied by the background job rather than by the page
+    // itself, so an ingest that does not see one must not erase a value we
+    // already collected for this exact date. `scannedAt` is carried over for
+    // the same reason, for a worse consequence: it marks the detail pass as
+    // done for that row, and losing it would make the next run re-fetch every
+    // player on a date just because the roster's ranks shifted.
+    const previousLords = await tx.lordSnapshot.findMany({
+      where: { snapshotId: snapshot.id },
+      select: { lordId: true, avatarUrl: true, scannedAt: true },
+    });
+    const knownLords = new Map(previousLords.map((row) => [row.lordId, row]));
+
+    const previousAlliances = await tx.allianceSnapshot.findMany({
+      where: { snapshotId: snapshot.id },
+      select: { allianceId: true, scannedAt: true },
+    });
+    const knownAlliances = new Map(previousAlliances.map((row) => [row.allianceId, row.scannedAt]));
+
     await tx.allianceSnapshot.deleteMany({ where: { snapshotId: snapshot.id } });
     await tx.lordSnapshot.deleteMany({ where: { snapshotId: snapshot.id } });
 
@@ -262,19 +288,26 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
           power: toBigIntStat(entity.stats?.Power),
           memberCount: toIntStat(entity.stats?.Members),
           rank: entity.rank ?? i + 1,
+          scannedAt: knownAlliances.get(allianceIds.get(entity.name)) || null,
         })),
       });
     }
 
     if (players.length) {
       await tx.lordSnapshot.createMany({
-        data: players.map((entity, i) => ({
-          snapshotId: snapshot.id,
-          lordId: lordIds.get(entity.id),
-          allianceId: entity.allianceId ? allianceIds.get(entity.allianceId) ?? null : null,
-          power: toBigIntStat(entity.stats?.Power),
-          rank: entity.rank ?? i + 1,
-        })),
+        data: players.map((entity, i) => {
+          const lordId = lordIds.get(entity.id);
+          const previous = knownLords.get(lordId);
+          return {
+            snapshotId: snapshot.id,
+            lordId,
+            allianceId: entity.allianceId ? allianceIds.get(entity.allianceId) ?? null : null,
+            power: toBigIntStat(entity.stats?.Power),
+            rank: entity.rank ?? i + 1,
+            avatarUrl: entity.avatar || previous?.avatarUrl || null,
+            scannedAt: previous?.scannedAt || null,
+          };
+        }),
       });
     }
 
@@ -315,6 +348,35 @@ function planWork(cachedDates, existing) {
   };
 }
 
+/**
+ * Whether a read should be thrown away rather than written over what is stored.
+ *
+ * A snapshot is replaced wholesale, so a bad read is destructive: when the
+ * source refuses us the page that comes back carries a handful of stray links,
+ * which has already overwritten a roster of 300 players with 10. A server does
+ * not shed most of its alliances and players overnight, so a read that comes
+ * back much smaller on both counts is discarded and the next run tries again.
+ */
+async function isDegraded(server, entry) {
+  const prior = await prisma.rosterSnapshot.findFirst({
+    where: { serverId: server.id, snapshotDate: toDate(entry.iso), status: 'COMPLETE' },
+    select: { allianceCount: true, lordCount: true },
+  });
+  if (!prior || !prior.allianceCount) return false;
+
+  const shrankBoth =
+    entry.alliances.length < prior.allianceCount * SHRINK_LIMIT &&
+    entry.players.length < prior.lordCount * SHRINK_LIMIT;
+  if (shrankBoth) {
+    console.warn(
+      `[ROSTER] Discarding a degraded read for ${entry.iso}: ` +
+        `${entry.alliances.length} alliances / ${entry.players.length} players, ` +
+        `against ${prior.allianceCount} / ${prior.lordCount} already stored.`,
+    );
+  }
+  return shrankBoth;
+}
+
 async function runSync({ reason = 'manual', batchSize } = {}) {
   if (running) return { skipped: true, reason: 'already_running' };
   running = true;
@@ -351,8 +413,8 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
       if (plan.needLatest) {
         const url = serverUrl();
         await open(page, url);
-        if (isLoginPage(page)) {
-          throw credentialError('Redirected to the login page before any data was read.');
+        if (isLoginPage(page) || redirectedElsewhere(page, url)) {
+          throw credentialError('Redirected away from the roster before any data was read.');
         }
         const state = await page.evaluate(readDateState);
         const extracted = await page.evaluate(extractEntities, { allianceId: null });
@@ -383,7 +445,7 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
       for (const iso of backfill) {
         const url = serverUrl({ date: iso });
         await open(page, url);
-        if (isLoginPage(page)) {
+        if (isLoginPage(page) || redirectedElsewhere(page, url)) {
           throw credentialError('The session lapsed while backfilling.');
         }
         const state = await page.evaluate(readDateState);
@@ -409,6 +471,7 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
 
     for (const entry of saved.sort((a, b) => (a.iso < b.iso ? -1 : 1))) {
       if (!entry.alliances.length && !entry.players.length) continue;
+      if (await isDegraded(server, entry)) continue;
       await saveSnapshot({
         server,
         isoDate: entry.iso,
@@ -483,8 +546,24 @@ function startSyncScheduler() {
     return null;
   }
 
-  const schedule = () =>
-    runSync({ reason: 'cron' }).catch((err) => console.warn('[ROSTER] cron sync:', err.message));
+  const schedule = async () => {
+    try {
+      await runSync({ reason: 'cron' });
+      // Detail runs before the avatar job because it reads the same pages and
+      // collects the picture while it is there; the avatar job then only has
+      // to mop up whatever the detail pass could not reach.
+      const detail = await require('./detail').runDetail({ reason: 'cron' });
+      // When the source has been refusing requests, the avatar job is just
+      // another 25 pages of the same answer - so it waits with everything else.
+      if (detail && (detail.skipped === 'cooldown' || detail.error === 'session_expired')) {
+        console.log('[ROSTER] Skipping the avatar job: the source is refusing us.');
+        return;
+      }
+      await require('./avatars').fillMissingAvatars({ reason: 'cron' });
+    } catch (err) {
+      console.warn('[ROSTER] cron sync:', err.message);
+    }
+  };
 
   cron.schedule(expression, schedule);
   console.log(`[ROSTER] Background sync scheduled: "${expression}"`);
@@ -502,6 +581,7 @@ module.exports = {
   getSyncState,
   saveSnapshot,
   ensureServer,
+  isDegraded,
   planWork,
   toBigIntStat,
 };

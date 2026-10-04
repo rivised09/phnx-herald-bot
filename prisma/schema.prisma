@@ -63,6 +63,76 @@ model Setting {
   @@map("settings")
 }
 
+/// One label/value fact read off a source page for one subject on one date.
+///
+/// The stats site exposes several hundred fields across the server, alliance
+/// and player pages, and its labels are effectively the schema - they shift
+/// between releases. Modelling them as columns would mean a migration every
+/// time a label changes, so they are stored as rows instead: a new label on the
+/// source needs no migration, and anything unrecognised is still captured.
+///
+/// The typed roster columns (power, rank, avatar) stay typed because the
+/// homepage sorts and paginates on them; these do not.
+model SnapshotMetric {
+  id          String  @id @default(uuid())
+  snapshotId  String  @map("snapshot_id")
+  /// SERVER, ALLIANCE or LORD - kept alongside subjectId so filtering does not
+  /// require parsing it back out of a composite key.
+  subjectType String  @db.VarChar(16) @map("subject_type")
+  /// Alliances/lords use their entity id; SERVER uses "" so the unique
+  /// constraint still bites (Postgres treats NULLs as distinct).
+  subjectId   String  @default("") @map("subject_id")
+  /// "War Stats", "Power Spread", "Playstyle" ... blank for ungrouped fields.
+  section     String  @default("") @db.VarChar(64)
+  label       String  @db.VarChar(160)
+  /// Exactly as the site rendered it: "Silver III ≥1600", "985,968 Sec".
+  valueText   String?  @map("value_text")
+  /// Parsed when the value is numeric; percentages and counts both land here.
+  valueNumber Float?   @map("value_number")
+  unit        String?  @db.VarChar(16)
+
+  snapshot    RosterSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@unique([snapshotId, subjectType, subjectId, section, label])
+  @@index([snapshotId, subjectType])
+  @@index([snapshotId, subjectId])
+  @@map("snapshot_metrics")
+}
+
+/// An achievement row from a player page: name, how far along it is, and
+/// whether it was completed. Kept out of SnapshotMetric because it is a real
+/// list with its own identity, not a flat label.
+model LordAchievement {
+  id            String  @id @default(uuid())
+  lordSnapshotId String @map("lord_snapshot_id")
+  name          String  @db.VarChar(160)
+  progress      BigInt?
+  /// Goal as reported in the source's "Not Completed (50,000,000)" text.
+  target        BigInt?
+  /// Raw "Time Completed" cell - a date when done, "Not Completed (N)" if not.
+  completedText String?  @map("completed_text")
+  completedAt   DateTime? @db.Date @map("completed_at")
+
+  lordSnapshot  LordSnapshot @relation(fields: [lordSnapshotId], references: [id], onDelete: Cascade)
+
+  @@unique([lordSnapshotId, name])
+  @@map("lord_achievements")
+}
+
+/// Every name a player has been seen under. The source lists these on the
+/// player page, so they are recorded whenever they appear rather than per date.
+model LordNameHistory {
+  id       String   @id @default(uuid())
+  lordId   String   @map("lord_id")
+  name     String
+  firstSeen DateTime @default(now()) @map("first_seen")
+
+  lord      Lord @relation(fields: [lordId], references: [id], onDelete: Cascade)
+
+  @@unique([lordId, name])
+  @@map("lord_name_history")
+}
+
 /// A server we ingest from the stats site (e.g. #973).
 model SourceServer {
   id           String          @id @default(uuid())
@@ -91,12 +161,16 @@ model RosterSnapshot {
   allianceCount Int      @default(0) @map("alliance_count")
   sourceUrl     String?  @map("source_url")
   status        String   @default("COMPLETE") @db.VarChar(20)
+  /// "Exact time server was scanned: 2026-10-04 05:51:52 UTC" as reported by
+  /// the source, which is authoritative and not simply when we happened to run.
+  scannedAt     DateTime? @map("scanned_at")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
   server        SourceServer        @relation(fields: [serverId], references: [id], onDelete: Cascade)
   allianceRows  AllianceSnapshot[]
   lordRows      LordSnapshot[]
+  metrics       SnapshotMetric[]
 
   @@unique([serverId, snapshotDate])
   @@index([serverId, snapshotDate(sort: Desc)])
@@ -132,6 +206,7 @@ model Lord {
 
   server    SourceServer    @relation(fields: [serverId], references: [id], onDelete: Cascade)
   snapshots LordSnapshot[]
+  nameHistory LordNameHistory[]
 
   @@unique([serverId, sourceId])
   @@map("lords")
@@ -147,6 +222,7 @@ model AllianceSnapshot {
   power       BigInt
   memberCount Int    @default(0) @map("member_count")
   rank        Int?
+  scannedAt   DateTime? @map("scanned_at")
 
   snapshot    RosterSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
   alliance    Alliance       @relation(fields: [allianceId], references: [id], onDelete: Cascade)
@@ -163,10 +239,15 @@ model LordSnapshot {
   allianceId String? @map("alliance_id")
   power      BigInt
   rank       Int?
+  /// Player avatar for that date. Null until an ingest reads it, or until the
+  /// background avatar job has walked the player's detail page.
+  avatarUrl  String? @map("avatar_url")
+  scannedAt  DateTime? @map("scanned_at")
 
   snapshot   RosterSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
   lord       Lord           @relation(fields: [lordId], references: [id], onDelete: Cascade)
   alliance   Alliance?      @relation(fields: [allianceId], references: [id], onDelete: SetNull)
+  achievements LordAchievement[]
 
   @@unique([snapshotId, lordId])
   @@index([allianceId])

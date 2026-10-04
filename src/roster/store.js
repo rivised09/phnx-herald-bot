@@ -65,7 +65,10 @@ async function getStoredRoster() {
   }
 
   const snapshot = await prisma.rosterSnapshot.findFirst({
-    where: { serverId: server.id },
+    // An unverified read may contain the source homepage shell rather than
+    // roster data. Never let it replace the newest complete database snapshot
+    // on the public page.
+    where: { serverId: server.id, status: 'COMPLETE' },
     orderBy: { snapshotDate: 'desc' },
     include: {
       allianceRows: { include: { alliance: true } },
@@ -107,6 +110,7 @@ async function getStoredRoster() {
       name: row.lord.name,
       index: row.rank,
       allianceId: row.alliance ? row.alliance.name : null,
+      avatar: row.avatarUrl || null,
       stats,
     };
   });
@@ -139,7 +143,16 @@ async function getStoredRoster() {
 
 /** Footer/health counts without building the full payload. */
 async function getStoredCounts() {
+  // Scoped to the configured server like getStoredRoster is: without this the
+  // footer reports whichever server happens to hold the newest date, which is
+  // someone else's roster as soon as a second server is ever ingested.
+  const server = await prisma.sourceServer.findUnique({
+    where: { serverNumber: Number(serverId()) },
+  });
+  if (!server) return { alliances: 0, players: 0, snapshotDate: null };
+
   const latest = await prisma.rosterSnapshot.findFirst({
+    where: { serverId: server.id, status: 'COMPLETE' },
     orderBy: { snapshotDate: 'desc' },
     select: { lordCount: true, allianceCount: true, snapshotDate: true },
   });

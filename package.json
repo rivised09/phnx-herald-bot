@@ -13,6 +13,7 @@
     "migrate": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
     "install:browsers": "playwright install --with-deps chromium",
+    "test": "node test/roster.test.js",
     "postinstall": "prisma generate"
   },
   "keywords": [],

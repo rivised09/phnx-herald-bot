@@ -1,6 +1,7 @@
 const express = require('express');
 const { getRoster, requestSync, invalidate, HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('../../roster');
 const { getSyncState } = require('../../roster/ingest');
+const { getAvatarState } = require('../../roster/avatars');
 const { getHomeVersionConfig } = require('../../settings');
 const { requireAccessCode } = require('../../auth/accessCode');
 
@@ -55,7 +56,12 @@ function homeRouter() {
     '/sync',
     asyncHandler(async (req, res) => {
       res.set('Cache-Control', 'no-store');
-      res.json(await getSyncState());
+      const [roster, avatars, detail] = await Promise.all([
+        getSyncState(),
+        getAvatarState(),
+        Promise.resolve().then(() => require('../../roster/detail').getDetailState()),
+      ]);
+      res.json({ ...roster, avatars, detail });
     }),
   );
 
