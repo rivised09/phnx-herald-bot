@@ -199,6 +199,11 @@ async function latestSnapshot(serverIdValue) {
  * Detail metrics are only ever written for the players whose detail page the
  * background pass has actually read, so a miss here is normal and means "not
  * measured yet" - never zero.
+ *
+ * Returns two maps rather than one: `Playstyle` holds percentiles that reuse
+ * the word "Merits", while `War Stats` holds an absolute merit count. Keeping
+ * them apart is the only way both can be read without one overwriting the
+ * other.
  */
 async function loadPlayerMetrics(serverIdValue, lordId) {
   const rows = await prisma.snapshotMetric.findMany({
@@ -208,21 +213,26 @@ async function loadPlayerMetrics(serverIdValue, lordId) {
       snapshot: { serverId: serverIdValue, status: 'COMPLETE' },
     },
     select: {
+      section: true,
       label: true,
       valueNumber: true,
       valueText: true,
       snapshot: { select: { snapshotDate: true } },
     },
-    orderBy: { snapshot: { snapshotDate: 'asc' } },
+    orderBy: [{ snapshot: { snapshotDate: 'asc' } }, { section: 'asc' }, { label: 'asc' }],
   });
-  const byDate = {};
+
+  const metrics = {};
+  const radar = {};
   for (const row of rows) {
-    const date = row.snapshot.snapshotDate.toISOString().slice(0, 10);
-    if (!byDate[date]) byDate[date] = {};
     const value = row.valueNumber !== null ? row.valueNumber : row.valueText;
-    if (value !== null && value !== undefined) byDate[date][row.label] = value;
+    if (value === null || value === undefined) continue;
+    const date = row.snapshot.snapshotDate.toISOString().slice(0, 10);
+    const bucket = row.section === 'Playstyle' ? radar : metrics;
+    if (!bucket[date]) bucket[date] = {};
+    bucket[date][row.label] = value;
   }
-  return byDate;
+  return { metrics, radar };
 }
 
 async function getPlayerDetail(sourceId) {
@@ -257,10 +267,14 @@ async function getPlayerDetail(sourceId) {
     power: item.power === null ? null : Number(item.power),
     rank: item.rank || null,
   }));
-  const metricsByDate = await loadPlayerMetrics(server.id, row.lordId);
+  const { metrics: metricsByDate, radar: radarByDate } = await loadPlayerMetrics(
+    server.id,
+    row.lordId,
+  );
   const insights = buildInsights({
     history,
     metricsByDate,
+    radarByDate,
     serverNumber: Number(serverId()),
     name: row.lord.name,
   });
@@ -329,5 +343,6 @@ module.exports = {
   getStoredCounts,
   getPlayerDetail,
   getAllianceDetail,
+  loadPlayerMetrics,
   formatStat,
 };

@@ -11,7 +11,7 @@ process.env.CALLOFSTATS_SERVER_ID = '999999';
 const prisma = require('../src/db');
 const ingest = require('../src/roster/ingest');
 const { saveSnapshot, planWork } = ingest;
-const { getStoredRoster, getStoredCounts, formatStat } = require('../src/roster/store');
+const { getStoredRoster, getStoredCounts, formatStat, loadPlayerMetrics } = require('../src/roster/store');
 const metrics = require('../src/roster/metrics');
 const extract = require('../src/roster/extract');
 const { accountCount, rotateCredentials } = require('../src/roster/session');
@@ -577,6 +577,142 @@ async function main() {
       assert.strictEqual(insights.compact(60000000), '60M');
       assert.strictEqual(insights.compact(950), '950');
       assert.strictEqual(insights.compact(null), null);
+    });
+
+    // --- playstyle hexagon ---
+    check('playstyle reader pulls the six hexagon axes', () => {
+      const attrs = {
+        'data-comparison': 'false',
+        'data-merits': '40.0',
+        'data-behemoths': '44.53',
+        'data-gathering': '20.0',
+        'data-peacekeeping': '20.0',
+        'data-healing': '60.0',
+        'data-engineering': '20.0',
+      };
+      const chart = { getAttribute: (key) => (key in attrs ? attrs[key] : null) };
+      const original = global.document;
+      const withDoc = (fn) => {
+        global.document = fn;
+        try {
+          return extract.readPlaystyle();
+        } finally {
+          if (original === undefined) delete global.document;
+          else global.document = original;
+        }
+      };
+
+      const rows = withDoc({ getElementById: (id) => (id === 'playstyleHexagon' ? chart : null) });
+      assert.deepStrictEqual(
+        rows.map((row) => row.label),
+        ['Merits', 'Behemoths', 'Gathering', 'Peacekeeping', 'Healing', 'Engineering'],
+      );
+      assert.deepStrictEqual(rows[0], { section: 'Playstyle', label: 'Merits', value: '40%' });
+      assert.strictEqual(rows[1].value, '44.53%');
+      assert.strictEqual(rows[5].value, '20%');
+      assert.strictEqual(rows.length, 6);
+
+      assert.deepStrictEqual(withDoc({ getElementById: () => null }), []);
+      assert.deepStrictEqual(
+        withDoc({ getElementById: () => ({ getAttribute: () => '' }) }),
+        [],
+      );
+    });
+
+    check('radar stays unavailable until the hexagon has been captured', () => {
+      const bare = insights.buildInsights({ history: insightHistory, metricsByDate: insightMetrics });
+      assert.strictEqual(bare.radar.available, false);
+      assert.strictEqual(bare.radar.reason, 'awaiting_capture');
+      assert.deepStrictEqual(bare.radar.readings, []);
+      assert.strictEqual(bare.radar.axes.length, 6);
+      assert.strictEqual(bare.radar.note, 'Lower percentages indicate a higher KvK ranking.');
+      assert.ok(/detail pass/.test(bare.radar.summary));
+    });
+
+    check('radar plots the current season against the previous reading', () => {
+      const radarByDate = {
+        '1999-01-08': {
+          Merits: 62,
+          Behemoths: 50,
+          Gathering: 44,
+          Peacekeeping: 30,
+          Healing: 70,
+          Engineering: 55,
+        },
+        '1999-01-15': {
+          Merits: 40,
+          Behemoths: 44.53,
+          Gathering: 20,
+          Peacekeeping: 20,
+          Healing: 60,
+          Engineering: 20,
+        },
+      };
+      const withDivision = {
+        ...insightMetrics,
+        '1999-01-08': { ...insightMetrics['1999-01-08'], Division: 'S2-100 | Season 2' },
+        '1999-01-15': { ...insightMetrics['1999-01-15'], Division: 'S3-100 | Season 3' },
+      };
+      const built = insights.buildInsights({
+        history: insightHistory,
+        metricsByDate: withDivision,
+        radarByDate,
+      });
+
+      const radar = built.radar;
+      assert.strictEqual(radar.available, true);
+      assert.strictEqual(radar.readings.length, 2);
+      assert.strictEqual(radar.current.date, '1999-01-15');
+      assert.strictEqual(radar.current.season, 3);
+      assert.strictEqual(radar.previous.date, '1999-01-08');
+      assert.strictEqual(radar.previous.season, 2);
+      assert.deepStrictEqual(
+        radar.axes.map((axis) => axis.key),
+        ['merits', 'behemoths', 'gathering', 'peacekeeping', 'healing', 'engineering'],
+      );
+      assert.deepStrictEqual(radar.current.values, [40, 44.53, 20, 20, 60, 20]);
+
+      const merits = radar.deltas.find((row) => row.key === 'merits');
+      assert.strictEqual(merits.delta, -22);
+      // Lower is better here, unlike every other metric in this module.
+      assert.strictEqual(merits.direction, 'better');
+      assert.strictEqual(radar.improved, 6);
+      assert.strictEqual(radar.worsened, 0);
+      assert.ok(/^Season 2 → Season 3/.test(radar.summary));
+      assert.ok(/improved on merits/.test(radar.summary));
+    });
+
+    check('radar falls back to dates when the season is unknown', () => {
+      const built = insights.buildInsights({
+        history: insightHistory,
+        metricsByDate: insightMetrics,
+        radarByDate: {
+          '1999-01-15': { Merits: 40, Healing: 60 },
+        },
+      });
+      assert.strictEqual(built.radar.available, true);
+      assert.strictEqual(built.radar.current.season, null);
+      assert.strictEqual(built.radar.previous, null);
+      assert.strictEqual(built.radar.deltas.length, 0);
+      assert.ok(/^1999-01-15/.test(built.radar.summary));
+    });
+
+    await metrics.saveSubjectMetrics(snapshot.id, 'LORD', lord.id, [
+      { section: 'War Stats', label: 'Merits', value: '166,571' },
+      { section: 'Playstyle', label: 'Merits', value: '40%' },
+      { section: 'Playstyle', label: 'Healing', value: '60%' },
+      { section: '', label: 'Division', value: 'S2-100 | Season 2' },
+    ]);
+    const split = await loadPlayerMetrics(server.id, lord.id);
+
+    check('playstyle percentiles never overwrite the merit count', () => {
+      const date = split.radar['1999-01-01'];
+      assert.ok(date, 'expected playstyle rows for the test snapshot date');
+      assert.strictEqual(date.Merits, 40);
+      assert.strictEqual(date.Healing, 60);
+      assert.strictEqual(split.metrics['1999-01-01'].Merits, 166571);
+      assert.strictEqual(split.metrics['1999-01-01'].Division, 'S2-100 | Season 2');
+      assert.strictEqual(date.Division, undefined);
     });
   } catch (err) {
     failed += 1;

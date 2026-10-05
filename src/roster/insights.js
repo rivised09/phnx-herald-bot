@@ -817,6 +817,109 @@ function buildComparison(series) {
   };
 }
 
+/**
+ * The source's own playstyle hexagon, in the game's axis order.
+ *
+ * Values are percentiles where **lower is better** - the source prints
+ * "Lower percentages indicate a higher KvK ranking" under the chart, and its
+ * own geometry puts a smaller percentage further from the centre, so a bigger
+ * polygon is the better account. Everything else in this module is
+ * "higher is better"; this block deliberately is not.
+ */
+const PLAYSTYLE_AXES = [
+  { key: 'merits', label: 'Merits' },
+  { key: 'behemoths', label: 'Behemoths' },
+  { key: 'gathering', label: 'Gathering' },
+  { key: 'peacekeeping', label: 'Peacekeeping' },
+  { key: 'healing', label: 'Healing' },
+  { key: 'engineering', label: 'Engineering' },
+];
+
+const PLAYSTYLE_NOTE = 'Lower percentages indicate a higher KvK ranking.';
+
+function seasonFromDivision(raw) {
+  const match = /Season\s*(\d+)/i.exec(String(raw || ''));
+  return match ? Number(match[1]) : null;
+}
+
+function readingLabel(reading) {
+  if (!reading) return 'unknown';
+  return reading.season ? `Season ${reading.season}` : reading.date;
+}
+
+function buildRadar(radarByDate = {}, metricsByDate = {}) {
+  const readings = Object.entries(radarByDate || {})
+    .map(([date, values]) => ({
+      date,
+      season: seasonFromDivision(metricsByDate[date] && metricsByDate[date].Division),
+      values: PLAYSTYLE_AXES.map((axis) => {
+        const value = num(values ? values[axis.label] : null);
+        return value === null ? null : clamp(value, 0, 100);
+      }),
+    }))
+    .filter((reading) => reading.values.some((value) => value !== null))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (!readings.length) {
+    return {
+      available: false,
+      reason: 'awaiting_capture',
+      note: PLAYSTYLE_NOTE,
+      axes: PLAYSTYLE_AXES,
+      readings: [],
+      current: null,
+      previous: null,
+      deltas: [],
+      summary:
+        'The playstyle hexagon is captured from the player page on the next detail pass.',
+    };
+  }
+
+  const current = readings[readings.length - 1];
+  const previous = readings.length > 1 ? readings[readings.length - 2] : null;
+
+  const deltas = PLAYSTYLE_AXES.map((axis, index) => {
+    if (!previous) return null;
+    const now = current.values[index];
+    const before = previous.values[index];
+    if (now === null || before === null) return null;
+    const delta = Number((now - before).toFixed(1));
+    return {
+      key: axis.key,
+      label: axis.label,
+      current: now,
+      previous: before,
+      delta,
+      deltaText: `${delta > 0 ? '+' : ''}${delta}`,
+      direction: delta < 0 ? 'better' : delta > 0 ? 'worse' : 'flat',
+    };
+  }).filter(Boolean);
+
+  const better = deltas.filter((row) => row.direction === 'better');
+  const worse = deltas.filter((row) => row.direction === 'worse');
+  const parts = previous
+    ? [`${readingLabel(previous)} → ${readingLabel(current)}`]
+    : [`${readingLabel(current)} captured`];
+  if (previous) {
+    if (better.length) parts.push(`improved on ${better.map((row) => row.label.toLowerCase()).join(', ')}`);
+    if (worse.length) parts.push(`slipped on ${worse.map((row) => row.label.toLowerCase()).join(', ')}`);
+    if (!better.length && !worse.length) parts.push('unchanged on every axis');
+  }
+
+  return {
+    available: true,
+    note: PLAYSTYLE_NOTE,
+    axes: PLAYSTYLE_AXES,
+    readings,
+    current,
+    previous,
+    deltas,
+    improved: better.length,
+    worsened: worse.length,
+    summary: parts.join(' · '),
+  };
+}
+
 function buildNarrative(name, playstyle, progress, profile, season, activity) {
   const powerRow = progress.series.find((row) => row.key === 'power');
   // "Overall" is a roll-up of the other signals, so naming it as both the top
@@ -860,6 +963,7 @@ function buildNarrative(name, playstyle, progress, profile, season, activity) {
 function buildInsights({
   history = [],
   metricsByDate = {},
+  radarByDate = {},
   serverNumber = null,
   name = 'This player',
 } = {}) {
@@ -880,6 +984,7 @@ function buildInsights({
   const season = buildSeason(last);
   const activity = buildActivity(series);
   const badges = buildBadges(series);
+  const radar = buildRadar(radarByDate, metricsByDate);
 
   const seasonsSeen = series
     .map((point) => num(point.metrics[M.seasonsPlayed]))
@@ -919,6 +1024,7 @@ function buildInsights({
     gains: buildGains(series, progress),
     milestones: buildMilestones(last),
     seasonJourney: season,
+    radar,
     activity,
     comparison: buildComparison(series),
     achievements: badges,
@@ -936,8 +1042,10 @@ module.exports = {
   buildGains,
   buildBadges,
   buildSeason,
+  buildRadar,
   buildActivity,
   buildComparison,
+  PLAYSTYLE_AXES,
   intensity,
   nextRound,
   compact,

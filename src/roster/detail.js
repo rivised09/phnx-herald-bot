@@ -474,15 +474,22 @@ async function detailLords(snapshot, parser, deadline, counters) {
       if (!item || !item.page || !canContinue(deadline)) continue;
       counters.pages += 1;
 
-      const [stats, achievements, history, avatar] = await parseAll(parser, item.page, [
+      const [stats, achievements, history, avatar, playstyle] = await parseAll(parser, item.page, [
         extract.readStatSections,
         extract.readAchievements,
         extract.readNameHistory,
         extract.readAvatar,
+        extract.readPlaystyle,
       ]);
 
       if (stats && stats.length) {
-        await saveSubjectMetrics(snapshot.id, SUBJECT.LORD, item.target.lordId, stats);
+        // Playstyle rides along with the rest so the delete-then-insert keeps
+        // the two in step: a page that stopped rendering the hexagon must stop
+        // leaving stale percentiles behind.
+        await saveSubjectMetrics(snapshot.id, SUBJECT.LORD, item.target.lordId, [
+          ...stats,
+          ...(playstyle || []),
+        ]);
       }
       if (achievements && achievements.length) {
         await saveAchievements(

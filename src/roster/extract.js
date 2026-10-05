@@ -15,6 +15,10 @@ const { USER_AGENT } = require('./http');
  *   achievement       .achievement-name + .achievement-values > (progress, completion)
  *   name history      .history-dropdown > .history-grid > .history-item
  *   avatar            .profile-picture-wrapper > img[alt="PFP"]
+ *   playstyle         #playstyleHexagon[data-merits="40.0"][data-healing="60.0"]
+ *
+ * Playstyle is the one reader that does not share the markup family: its six
+ * axes are data attributes on a chart container rather than label/value pairs.
  *
  * The heading-to-cell pairing is done by document order rather than by DOM
  * nesting: the same `.stat-item` markup is wrapped in `server-glass` on one
@@ -138,6 +142,44 @@ function readAvatar() {
 }
 
 /**
+ * The source's own playstyle hexagon: six percentile axes for the selected date.
+ *
+ * It is not a stat cell - the values live in `data-*` attributes on
+ * `#playstyleHexagon` - so the section walker above never sees them and a
+ * separate reader is required. Axis order is the game's and is fixed:
+ * Merits, Behemoths, Gathering, Peacekeeping, Healing, Engineering.
+ *
+ * These are percentages, and the source is explicit about their direction
+ * ("Lower percentages indicate a higher KvK ranking"), so a smaller number is
+ * a better one. They are stored under their own section because `Merits` here
+ * is a percentile while `Merits` in War Stats is an absolute count - the two
+ * must not share a key.
+ */
+function readPlaystyle() {
+  const chart = document.getElementById('playstyleHexagon');
+  if (!chart) return [];
+
+  const axes = [
+    ['Merits', 'merits'],
+    ['Behemoths', 'behemoths'],
+    ['Gathering', 'gathering'],
+    ['Peacekeeping', 'peacekeeping'],
+    ['Healing', 'healing'],
+    ['Engineering', 'engineering'],
+  ];
+
+  const rows = [];
+  for (const [label, key] of axes) {
+    const raw = chart.getAttribute(`data-${key}`);
+    if (raw === null || raw === undefined || raw === '') continue;
+    const value = Number(String(raw).replace(/,/g, '').replace(/\+/g, ''));
+    if (!Number.isFinite(value)) continue;
+    rows.push({ section: 'Playstyle', label, value: `${value}%` });
+  }
+  return rows;
+}
+
+/**
  * Member ids shown on the current page, used to confirm that an alliance page
  * found by name really belongs to the server we are syncing.
  */
@@ -253,6 +295,7 @@ module.exports = {
   readAchievements,
   readNameHistory,
   readAvatar,
+  readPlaystyle,
   readMemberIds,
   queryVariants,
   resolveAllianceIds,
