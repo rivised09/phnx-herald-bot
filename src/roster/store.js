@@ -47,6 +47,17 @@ function failure(status, detail) {
   };
 }
 
+/**
+ * The source hands out one shared "no picture yet" asset. Storing it is
+ * harmless, but serving it would show the same face for every player, so the
+ * reads here skip it and fall through to the player's real history.
+ */
+const PLACEHOLDER_AVATAR = /codweb_all_three_avatar|\/static\/images\//;
+
+function usableAvatar(value) {
+  return value && !PLACEHOLDER_AVATAR.test(value) ? value : null;
+}
+
 async function historicalAvatarMap(serverIdValue, lordIds) {
   if (!lordIds.length) return new Map();
   const rows = await prisma.lordSnapshot.findMany({
@@ -60,7 +71,8 @@ async function historicalAvatarMap(serverIdValue, lordIds) {
   });
   const result = new Map();
   for (const row of rows) {
-    if (!result.has(row.lordId)) result.set(row.lordId, row.avatarUrl);
+    const value = usableAvatar(row.avatarUrl);
+    if (value && !result.has(row.lordId)) result.set(row.lordId, value);
   }
   return result;
 }
@@ -133,7 +145,7 @@ async function getStoredRoster() {
       name: row.lord.name,
       index: row.rank,
       allianceId: row.alliance ? row.alliance.name : null,
-      avatar: row.avatarUrl || avatarByLord.get(row.lordId) || null,
+      avatar: usableAvatar(row.avatarUrl) || avatarByLord.get(row.lordId) || null,
       stats,
     };
   });
@@ -284,7 +296,7 @@ async function getPlayerDetail(sourceId) {
     name: row.lord.name,
     rank: row.rank,
     power: formatStat(row.power),
-    avatar: row.avatarUrl || avatarByLord.get(row.lordId) || null,
+    avatar: usableAvatar(row.avatarUrl) || avatarByLord.get(row.lordId) || null,
     alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
     snapshotDate: row.snapshot.snapshotDate.toISOString().slice(0, 10),
     history,
