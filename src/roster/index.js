@@ -1,23 +1,18 @@
-const { HOME_VERSIONS, DEFAULT_HOME_VERSION } = require('../settings');
-
 /**
- * Dispatcher for the public home page roster.
+ * The public home page roster.
  *
- * v1 and v2 have separate sources; this file only decides which one to call
- * and caches the result briefly so a burst of visitors does not turn into a
- * burst of work.
+ * One source, deliberately: the snapshots the bot has already written to
+ * Supabase. The page reads the database and never asks the stats site for a
+ * row - fetching from the site is the bot's job, and doing it here would put a
+ * live scrape between a visitor and their page, on a page load, at whatever
+ * hour they happen to arrive.
  *
- * v1 reads snapshots that ./ingest wrote ahead of time, so a request never
- * launches a browser. That also means the cache is a minor optimisation
- * rather than a scrape shield, and it is kept short so a newly ingested date
- * reaches visitors quickly. Filling the database is the scheduler's job; a
- * visitor asking for fresh data only triggers a background run.
+ * The cache is a minor optimisation rather than a scrape shield: a burst of
+ * visitors costs a burst of queries, not of requests upstream. It is kept
+ * short so a newly ingested date reaches visitors quickly.
  */
 
-const TTL_MS = {
-  v1: envInt('ROSTER_V1_TTL_MS', 60 * 1000),
-  v2: 60 * 1000,
-};
+const TTL_MS = envInt('ROSTER_V1_TTL_MS', 60 * 1000);
 
 function envInt(name, fallback) {
   const parsed = parseInt(process.env[name] || '', 10);
@@ -26,29 +21,17 @@ function envInt(name, fallback) {
 
 const cache = new Map();
 
-const LOADERS = {
-  v1: () => require('./store').getStoredRoster(),
-  v2: () => require('./v2').getRoster(),
-};
-
-function normalizeVersion(value) {
-  const v = String(value || '').trim().toLowerCase();
-  return HOME_VERSIONS.includes(v) ? v : DEFAULT_HOME_VERSION;
-}
-
-async function getRoster(version, { force = false } = {}) {
-  const v = normalizeVersion(version);
-  const hit = cache.get(v);
-  if (!force && hit && Date.now() - hit.at < (TTL_MS[v] || TTL_MS.v2)) {
+async function getRoster({ force = false } = {}) {
+  const hit = cache.get('v1');
+  if (!force && hit && Date.now() - hit.at < TTL_MS) {
     return { ...hit.value, cached: true };
   }
 
   let value;
   try {
-    value = await LOADERS[v]();
+    value = await require('./store').getStoredRoster();
   } catch (err) {
     value = {
-      version: v,
       status: 'fetch_failed',
       detail: err.message,
       alliances: [],
@@ -56,7 +39,7 @@ async function getRoster(version, { force = false } = {}) {
     };
   }
 
-  cache.set(v, { at: Date.now(), value });
+  cache.set('v1', { at: Date.now(), value });
   return { ...value, cached: false };
 }
 
@@ -70,7 +53,7 @@ async function getRoster(version, { force = false } = {}) {
  * The detail pass follows the roster sync because it can only work on
  * snapshots that exist. It is budget-limited and locks itself, so a refresh
  * request on a quiet site costs a handful of queries and on a busy one simply
- * adds another bounded slice to the backfill.
+ * adds another bounded slice of work.
  */
 function requestSync(reason = 'request') {
   const { runSync } = require('./ingest');
@@ -86,4 +69,4 @@ function invalidate() {
   cache.clear();
 }
 
-module.exports = { getRoster, requestSync, invalidate, HOME_VERSIONS, DEFAULT_HOME_VERSION };
+module.exports = { getRoster, requestSync, invalidate };

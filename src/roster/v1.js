@@ -326,7 +326,7 @@ function extractEntities({ allianceId } = {}) {
 }
 
 function failure(status, detail) {
-  return { version: 'v1', status, detail, alliances: [], players: [] };
+  return { status, detail, alliances: [], players: [] };
 }
 
 /**
@@ -473,7 +473,6 @@ async function getRoster() {
   }
 
   return {
-    version: 'v1',
     status: empty ? 'parse_empty' : 'ok',
     detail: empty
       ? `No alliance or player links were recognised.${describePage(serverMeta)}`

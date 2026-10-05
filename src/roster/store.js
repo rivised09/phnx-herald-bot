@@ -36,7 +36,6 @@ function formatStat(value) {
 
 function failure(status, detail) {
   return {
-    version: 'v1',
     status,
     detail,
     server: null,
@@ -161,7 +160,6 @@ async function getStoredRoster() {
   }
 
   return {
-    version: 'v1',
     status: alliances.length === 0 && players.length === 0 ? 'parse_empty' : 'ok',
     detail: notes.length ? notes.join(' ') : null,
     server: { id: String(number), url },
@@ -212,12 +210,18 @@ async function latestSnapshot(serverIdValue) {
  * background pass has actually read, so a miss here is normal and means "not
  * measured yet" - never zero.
  *
- * Returns two maps rather than one: `Playstyle` holds percentiles that reuse
- * the word "Merits", while `War Stats` holds an absolute merit count. Keeping
- * them apart is the only way both can be read without one overwriting the
- * other.
+ * Returns three things rather than one: `Playstyle` holds percentiles that
+ * reuse the word "Merits", while `War Stats` holds an absolute merit count, so
+ * those two are kept apart or one would overwrite the other. `sections` is the
+ * newest date's remaining blocks, grouped exactly as the source prints them -
+ * the raw figures behind the interpreted insights, for the tabbed page.
+ *
+ * `snapshotDate` picks which date's blocks come back - the profile page reads
+ * one snapshot at a time. Left unset, the newest date that has any is used.
+ * `metrics` and `radar` always span every date either way: the interpreted
+ * view is built from a series, and a single point is not a series.
  */
-async function loadPlayerMetrics(serverIdValue, lordId) {
+async function loadPlayerMetrics(serverIdValue, lordId, { snapshotDate = null } = {}) {
   const rows = await prisma.snapshotMetric.findMany({
     where: {
       subjectType: 'LORD',
@@ -236,31 +240,115 @@ async function loadPlayerMetrics(serverIdValue, lordId) {
 
   const metrics = {};
   const radar = {};
+  const byDate = new Map();
+  let newestWithRows = null;
   for (const row of rows) {
     const value = row.valueNumber !== null ? row.valueNumber : row.valueText;
     if (value === null || value === undefined) continue;
     const date = row.snapshot.snapshotDate.toISOString().slice(0, 10);
-    const bucket = row.section === 'Playstyle' ? radar : metrics;
+    const playstyle = row.section === 'Playstyle';
+    const bucket = playstyle ? radar : metrics;
     if (!bucket[date]) bucket[date] = {};
     bucket[date][row.label] = value;
+    if (playstyle) continue;
+
+    // The rendered string is what the tabs show: the number alone would turn
+    // "54.49%" and "0.0%" into 54.49 and 0, and "21,520 Sec" into 21520.
+    if (!byDate.has(date)) byDate.set(date, new Map());
+    const bySection = byDate.get(date);
+    if (!bySection.has(row.section)) bySection.set(row.section, []);
+    bySection.get(row.section).push({ label: row.label, value: row.valueText });
+    newestWithRows = date;
   }
-  return { metrics, radar };
+
+  // Ascending order means the last date seen is the newest one.
+  const wanted = snapshotDate || newestWithRows;
+  const sections = wanted && byDate.has(wanted)
+    ? [...byDate.get(wanted)].map(([section, entries]) => ({ section, rows: entries }))
+    : [];
+
+  return { metrics, radar, sections, sectionsDate: sections.length ? wanted : null };
 }
 
-async function getPlayerDetail(sourceId) {
+/**
+ * One date a player can be read at, or null when it is not a date.
+ *
+ * The profile's picker only offers dates that exist, but a bookmarked or
+ * stale URL can ask for anything, and an unparsable one must not reach a query.
+ */
+function snapshotDateParam(value) {
+  const iso = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : null;
+}
+
+function isoDay(value) {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
+
+function dayStart(iso) {
+  return new Date(`${iso}T00:00:00.000Z`);
+}
+
+/** Keeps only the dates that are at or before `iso`, so nothing later shows. */
+function upTo(byDate, iso) {
+  const out = {};
+  for (const [date, values] of Object.entries(byDate || {})) {
+    if (date <= iso) out[date] = values;
+  }
+  return out;
+}
+
+/**
+ * A player's profile at one point in time.
+ *
+ * `date` selects the snapshot to read; unset means the newest one, which is
+ * what the page shows before anyone touches the picker. Everything the page
+ * derives from a series - the chart, the insights, the raw stat blocks - is
+ * cut at the selected date as well, so an older snapshot reads as that snapshot
+ * rather than as today's numbers with an old date next to them.
+ *
+ * The dates the picker offers come from the same player's own rows, newest
+ * first; a player who only appears on one date gets one option and the web UI
+ * hides the control.
+ */
+async function getPlayerDetail(sourceId, { date = null } = {}) {
   const server = await prisma.sourceServer.findUnique({
     where: { serverNumber: Number(serverId()) },
   });
   if (!server) return null;
-  const row = await prisma.lordSnapshot.findFirst({
-    where: {
-      lord: { serverId: server.id, sourceId: BigInt(sourceId) },
-      snapshot: { serverId: server.id, status: 'COMPLETE' },
-    },
-    include: { lord: true, alliance: true, achievements: true, snapshot: true },
+
+  const lord = await prisma.lord.findFirst({
+    where: { serverId: server.id, sourceId: BigInt(sourceId) },
+    select: { id: true },
+  });
+  if (!lord) return null;
+
+  const dated = await prisma.lordSnapshot.findMany({
+    where: { lordId: lord.id, snapshot: { serverId: server.id, status: 'COMPLETE' } },
+    select: { snapshot: { select: { snapshotDate: true } } },
     orderBy: { snapshot: { snapshotDate: 'desc' } },
   });
+  const snapshotDates = [];
+  for (const item of dated) {
+    const iso = isoDay(item.snapshot.snapshotDate);
+    if (snapshotDates[0] !== iso) snapshotDates.push(iso);
+  }
+  if (!snapshotDates.length) return null;
+
+  // A date with no row for this player falls back to the newest one: the page
+  // must still render rather than 404 because a link outlived the snapshot.
+  const requested = snapshotDateParam(date);
+  const wanted = requested && snapshotDates.includes(requested) ? requested : snapshotDates[0];
+
+  const row = await prisma.lordSnapshot.findFirst({
+    where: {
+      lordId: lord.id,
+      snapshot: { serverId: server.id, status: 'COMPLETE', snapshotDate: dayStart(wanted) },
+    },
+    include: { lord: true, alliance: true, achievements: true, snapshot: true },
+  });
   if (!row) return null;
+
   const avatarByLord = await historicalAvatarMap(server.id, [row.lordId]);
   const historyRows = await prisma.lordSnapshot.findMany({
     where: {
@@ -274,15 +362,18 @@ async function getPlayerDetail(sourceId) {
     },
     orderBy: { snapshot: { snapshotDate: 'asc' } },
   });
-  const history = historyRows.map((item) => ({
-    date: item.snapshot.snapshotDate.toISOString().slice(0, 10),
-    power: item.power === null ? null : Number(item.power),
-    rank: item.rank || null,
-  }));
-  const { metrics: metricsByDate, radar: radarByDate } = await loadPlayerMetrics(
-    server.id,
-    row.lordId,
-  );
+  const history = historyRows
+    .map((item) => ({
+      date: item.snapshot.snapshotDate.toISOString().slice(0, 10),
+      power: item.power === null ? null : Number(item.power),
+      rank: item.rank || null,
+    }))
+    .filter((point) => point.date <= wanted);
+
+  const { metrics: allMetrics, radar: allRadar, sections, sectionsDate } =
+    await loadPlayerMetrics(server.id, row.lordId, { snapshotDate: wanted });
+  const metricsByDate = upTo(allMetrics, wanted);
+  const radarByDate = upTo(allRadar, wanted);
   const insights = buildInsights({
     history,
     metricsByDate,
@@ -298,8 +389,13 @@ async function getPlayerDetail(sourceId) {
     power: formatStat(row.power),
     avatar: usableAvatar(row.avatarUrl) || avatarByLord.get(row.lordId) || null,
     alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
-    snapshotDate: row.snapshot.snapshotDate.toISOString().slice(0, 10),
+    snapshotDate: wanted,
+    snapshotDates,
+    requestedDate: requested,
+    isLatest: wanted === snapshotDates[0],
     history,
+    sections,
+    sectionsDate,
     insights,
     achievements: row.achievements.map((item) => ({
       name: item.name,

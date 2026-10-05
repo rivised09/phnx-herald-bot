@@ -1,5 +1,6 @@
 const prisma = require('../db');
 const { withAuthedPage, BASE } = require('./session');
+const { historyEnabled, scopeLabel } = require('./scope');
 const {
   serverId,
   sourceUrl,
@@ -22,6 +23,11 @@ const {
  *     toward the last verified snapshot, capped at a small batch so a cold
  *     start cannot outlive Railway's request timeout,
  *   - a date that is already stored and current costs nothing at all.
+ *
+ * How far back that second step goes is decided by ROSTER_HISTORY (see
+ * ./scope.js). The deployed bot leaves it off and therefore only ever keeps
+ * the newest date fresh; the local machine turns it on to fill in the dates
+ * behind it.
  *
  * STATUS VALUES (written to roster_snapshots.status):
  *   COMPLETE        - the page carried a date we could confirm
@@ -351,6 +357,13 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
       }
     }
 
+    // Ranking happens here rather than at extraction so every path into this
+    // function lands on the same rule - including the members appended by
+    // `crawlAllianceMembers`, which arrive after the leaderboard's own rows
+    // and would otherwise be numbered by their position in the array.
+    rankByPower(alliances);
+    rankByPower(players);
+
     if (alliances.length) {
       await tx.allianceSnapshot.createMany({
         data: alliances.map((entity, i) => ({
@@ -392,10 +405,28 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
   });
 }
 
-/** Keeps extraction order: the source already renders rows power-ranked. */
-function rankInOrder(list) {
-  list.forEach((entity, i) => {
-    if (!entity.rank) entity.rank = i + 1;
+/**
+ * Ranks a roster by power, strongest first.
+ *
+ * The source renders the server roster as a run of alliance blocks and
+ * restarts its position counter at 1 for every block, so extraction order is
+ * "position within the current alliance": the tail of one block (a couple of
+ * million power) lands above the head of the next (tens of millions). Rank is
+ * therefore derived here rather than read off the page - highest power first,
+ * extraction order as the tie-break - so the rank column always agrees with
+ * the power printed beside it.
+ *
+ * Mutates `list` and returns it.
+ */
+function rankByPower(list) {
+  const ranked = [...list].sort((a, b) => {
+    const left = toBigIntStat(a.stats?.Power);
+    const right = toBigIntStat(b.stats?.Power);
+    if (left === right) return 0;
+    return left > right ? -1 : 1;
+  });
+  ranked.forEach((entity, i) => {
+    entity.rank = i + 1;
   });
   return list;
 }
@@ -471,11 +502,17 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
 
     const cachedDates = discoveryFresh() ? discovery.dates || [] : null;
     const plan = planWork(cachedDates, existing);
+    // History is opt-in (./scope.js). With it off, a date we have never stored
+    // is not this run's business, so only refreshing the newest date counts as
+    // work - a server that still lists a month of dates the database has never
+    // heard of does not turn every hourly tick into a backfill.
+    const needBackfill = historyEnabled() && plan.needBackfill;
 
-    if (!plan.needLatest && !plan.needBackfill) {
+    if (!plan.needLatest && !needBackfill) {
       const summary = {
         skipped: false,
         reason,
+        scope: scopeLabel(),
         server: server.serverNumber,
         discoveredDates: cachedDates.length,
         savedDates: [],
@@ -520,8 +557,8 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
         latest = await crawlAllianceMembers(page, {
           iso,
           url,
-          alliances: rankInOrder(extracted.alliances),
-          players: rankInOrder(extracted.players),
+          alliances: extracted.alliances,
+          players: extracted.players,
           status: 'COMPLETE',
           meta: extracted.meta,
         }, iso);
@@ -534,10 +571,13 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
 
       // Keep the newest date first, but do not discard older dates from the
       // queue. The batch limit controls work per run; every discovered date
-      // must remain eligible for a later run.
-      const missing = known
-        .filter((iso) => !existing.has(iso) && (!latest || iso !== latest.iso))
-        .reverse();
+      // must remain eligible for a later run - which is only a promise made
+      // when history is switched on, since a latest-only run never queues one.
+      const missing = needBackfill
+        ? known
+            .filter((iso) => !existing.has(iso) && (!latest || iso !== latest.iso))
+            .reverse()
+        : [];
       const backfill = missing.slice(0, Math.max(0, limit));
 
       for (const iso of backfill) {
@@ -555,8 +595,8 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
         targets.push({
           iso,
           url,
-          alliances: rankInOrder(extracted.alliances),
-          players: rankInOrder(extracted.players),
+          alliances: extracted.alliances,
+          players: extracted.players,
           status: 'COMPLETE',
           meta: extracted.meta,
           empty,
@@ -586,6 +626,7 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
     const summary = {
       skipped: false,
       reason,
+      scope: scopeLabel(),
       server: server.serverNumber,
       discoveredDates: outcome.discovered,
       savedDates: saved.map((s) => s.iso),
@@ -623,6 +664,7 @@ async function getSyncState() {
     const dates = [...existing.keys()].sort();
     return {
       running,
+      scope: scopeLabel(),
       server: server.serverNumber,
       snapshots: existing.size,
       oldest: dates[0] || null,

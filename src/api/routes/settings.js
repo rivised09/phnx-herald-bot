@@ -2,9 +2,6 @@ const express = require('express');
 const {
   getAutoRefreshConfig,
   setAutoRefreshConfig,
-  getHomeVersionConfig,
-  setHomeVersionConfig,
-  HOME_VERSIONS,
   MIN_INTERVAL_MS,
   MAX_INTERVAL_MS,
 } = require('../../settings');
@@ -21,14 +18,9 @@ function settingsRouter() {
     '/',
     requireAccessCode,
     asyncHandler(async (req, res) => {
-      const [autoRefresh, homeVersion] = await Promise.all([
-        getAutoRefreshConfig(),
-        getHomeVersionConfig(),
-      ]);
+      const autoRefresh = await getAutoRefreshConfig();
       res.json({
         autoRefresh,
-        homeVersion,
-        homeVersions: HOME_VERSIONS,
         limits: { minIntervalMs: MIN_INTERVAL_MS, maxIntervalMs: MAX_INTERVAL_MS },
       });
     }),
@@ -44,23 +36,12 @@ function settingsRouter() {
       if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
       if (body.intervalMs !== undefined) patch.intervalMs = body.intervalMs;
 
-      if (body.homeVersion !== undefined && !HOME_VERSIONS.includes(String(body.homeVersion))) {
-        return res.status(400).json({
-          error: `homeVersion must be one of: ${HOME_VERSIONS.join(', ')}.`,
-        });
-      }
-
-      if (Object.keys(patch).length === 0 && body.homeVersion === undefined) {
+      if (Object.keys(patch).length === 0) {
         return res.status(400).json({ error: 'Nothing to update.' });
       }
 
-      const autoRefresh =
-        Object.keys(patch).length > 0 ? await setAutoRefreshConfig(patch) : await getAutoRefreshConfig();
-
-      const homeVersion =
-        body.homeVersion === undefined ? await getHomeVersionConfig() : await setHomeVersionConfig(body.homeVersion);
-
-      res.json({ autoRefresh, homeVersion, homeVersions: HOME_VERSIONS });
+      const autoRefresh = await setAutoRefreshConfig(patch);
+      res.json({ autoRefresh });
     }),
   );
 

@@ -9,7 +9,10 @@ function rosterRouter() {
       // The lookup casts to BigInt, so anything non-numeric would otherwise
       // surface as a 500 instead of the 404 it obviously means.
       if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: 'Player not found' });
-      const data = await getPlayerDetail(req.params.id);
+      // `date` picks a snapshot; unset means the newest, which is what the
+      // profile shows before anyone uses the picker. Anything that is not a
+      // date is ignored rather than rejected - see snapshotDateParam.
+      const data = await getPlayerDetail(req.params.id, { date: req.query.date });
       if (!data) return res.status(404).json({ error: 'Player not found' });
       return res.json(data);
     } catch (err) {

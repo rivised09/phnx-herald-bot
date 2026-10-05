@@ -11,10 +11,11 @@ process.env.CALLOFSTATS_SERVER_ID = '999999';
 const prisma = require('../src/db');
 const ingest = require('../src/roster/ingest');
 const { saveSnapshot, planWork } = ingest;
-const { getStoredRoster, getStoredCounts, formatStat, loadPlayerMetrics } = require('../src/roster/store');
+const { getStoredRoster, getStoredCounts, formatStat, loadPlayerMetrics, getPlayerDetail } = require('../src/roster/store');
 const metrics = require('../src/roster/metrics');
 const extract = require('../src/roster/extract');
 const { accountCount, rotateCredentials } = require('../src/roster/session');
+const { historyEnabled, scopeLabel } = require('../src/roster/scope');
 const detail = require('../src/roster/detail');
 const insights = require('../src/roster/insights');
 
@@ -158,6 +159,19 @@ check('rotation cycles accounts and refuses to loop on one', () => {
   assert.strictEqual(accountCount(), 2);
   assert.ok(rotateCredentials());
   assert.ok(rotateCredentials(), 'wraps back to the first account');
+});
+
+// Which dates a run may touch is a switch, and the deployed default has to be
+// the cheap one: latest only, with history as something a person asks for.
+check('history stays off unless a process asks for it', () => {
+  delete process.env.ROSTER_HISTORY;
+  assert.strictEqual(historyEnabled(), false);
+  assert.strictEqual(scopeLabel(), 'latest');
+
+  process.env.ROSTER_HISTORY = '1';
+  assert.strictEqual(historyEnabled(), true);
+  assert.strictEqual(scopeLabel(), 'history');
+  delete process.env.ROSTER_HISTORY;
 });
 
 // ------------------------------------------------------------- databases ---
@@ -714,6 +728,142 @@ async function main() {
       assert.strictEqual(split.metrics['1999-01-01'].Division, 'S2-100 | Season 2');
       assert.strictEqual(date.Division, undefined);
     });
+
+    check('raw stat blocks keep the rendered text and leave playstyle to the radar', () => {
+      assert.strictEqual(split.sectionsDate, DATE);
+      assert.deepStrictEqual(
+        split.sections.map((block) => block.section),
+        ['', 'War Stats'],
+        'Playstyle belongs to the radar, not the tab blocks',
+      );
+      assert.deepStrictEqual(split.sections[1].rows, [
+        { label: 'Merits', value: '166,571' },
+      ]);
+      assert.deepStrictEqual(split.sections[0].rows, [
+        { label: 'Division', value: 'S2-100 | Season 2' },
+      ]);
+    });
+
+    // The source numbers its lords inside each alliance block and restarts the
+    // counter at 1 for every block, so extraction order is "position in the
+    // current alliance" rather than a server ranking.
+    await saveSnapshot({
+      server,
+      isoDate: '1999-01-02',
+      status: 'COMPLETE',
+      url: 'u',
+      alliances: [],
+      players: [
+        { id: '2001', name: 'BlockTail', allianceId: '[BBB] Beta', stats: { Power: '4,700,000' } },
+        { id: '2002', name: 'BlockHead', allianceId: '[AAA] Alpha', stats: { Power: '67,000,000' } },
+        { id: '2003', name: 'Middle', allianceId: '[BBB] Beta', stats: { Power: '18,000,000' } },
+      ],
+    });
+    const ranked = await prisma.lordSnapshot.findMany({
+      where: { snapshot: { serverId: server.id, snapshotDate: isoDate('1999-01-02') } },
+      select: { rank: true, power: true, lord: { select: { name: true } } },
+      orderBy: { rank: 'asc' },
+    });
+
+    check('rank follows power, not the order the source printed rows in', () => {
+      assert.deepStrictEqual(ranked.map((row) => row.lord.name), ['BlockHead', 'Middle', 'BlockTail']);
+      assert.deepStrictEqual(ranked.map((row) => row.rank), [1, 2, 3]);
+      for (let i = 1; i < ranked.length; i += 1) {
+        assert.ok(ranked[i].power <= ranked[i - 1].power, 'power must not rise with rank');
+      }
+    });
+
+    // The profile reads one snapshot at a time. The newest one is what it
+    // shows before anyone touches the picker; an older one cuts the series the
+    // insights are built from, so that page reads as its own date rather than
+    // as today's numbers wearing an old date beside them. The lord here is the
+    // one the metric blocks were written for above.
+    await saveSnapshot({
+      server,
+      isoDate: '1999-01-03',
+      status: 'COMPLETE',
+      url: 'u',
+      alliances: ALLIANCES,
+      players: [
+        { id: '1001', name: 'Zed', rank: 1, allianceId: '[AAA] Alpha', stats: { Rank: '1', Power: '41,000,000,000' } },
+        { id: '25615899', name: 'riv', rank: 2, allianceId: '[BBB] Beta', stats: { Rank: '2', Power: '25,000,000' } },
+      ],
+    });
+
+    const newest = await getPlayerDetail('25615899');
+    check('the profile opens on the newest snapshot', () => {
+      assert.strictEqual(newest.snapshotDate, '1999-01-03');
+      assert.deepStrictEqual(newest.snapshotDates, ['1999-01-03', '1999-01-01']);
+      assert.strictEqual(newest.isLatest, true);
+      assert.strictEqual(newest.history.length, 2);
+      assert.strictEqual(newest.history[newest.history.length - 1].date, '1999-01-03');
+      assert.strictEqual(newest.power, '25,000,000');
+      assert.strictEqual(newest.sectionsDate, null, 'no detail has been read for the new date');
+    });
+
+    const past = await getPlayerDetail('25615899', { date: '1999-01-01' });
+    check('an older snapshot cuts the series at its own date', () => {
+      assert.strictEqual(past.snapshotDate, '1999-01-01');
+      assert.strictEqual(past.isLatest, false);
+      assert.deepStrictEqual(past.history.map((point) => point.date), ['1999-01-01']);
+      assert.strictEqual(past.power, '18,300,813');
+      assert.strictEqual(past.insights.coverage.last, '1999-01-01');
+      assert.strictEqual(past.sectionsDate, DATE, 'the raw blocks come from that date too');
+      assert.ok(past.sections.length > 0);
+    });
+
+    const unknownDate = await getPlayerDetail('25615899', { date: 'not-a-date' });
+    const missingDate = await getPlayerDetail('25615899', { date: '2000-01-01' });
+    check('a date that does not exist falls back to the newest', () => {
+      assert.strictEqual(unknownDate.snapshotDate, '1999-01-03');
+      assert.strictEqual(unknownDate.requestedDate, null);
+      assert.strictEqual(missingDate.snapshotDate, '1999-01-03');
+      assert.strictEqual(missingDate.requestedDate, '2000-01-01');
+    });
+
+    // A cookie the source has already discarded answers every request with a
+    // 303 to /, so following redirects blindly is an infinite loop. That has to
+    // surface as an expired session, which is what triggers the re-login.
+    const { createServer } = require('http');
+    const { fetchHtml } = require('../src/roster/http');
+    const loop = createServer((req, res) => {
+      res.writeHead(303, { Location: '/', 'Set-Cookie': 'session_token=; Path=/' });
+      res.end();
+    });
+    const once = createServer((req, res) => {
+      if (String(req.url).startsWith('/login')) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<form action="/login" method="post"></form>');
+        return;
+      }
+      res.writeHead(303, { Location: '/login' });
+      res.end();
+    });
+    await new Promise((resolve) => loop.listen(0, '127.0.0.1', resolve));
+    await new Promise((resolve) => once.listen(0, '127.0.0.1', resolve));
+    try {
+      const looped = await fetchHtml(`http://127.0.0.1:${loop.address().port}/lord/1`, {
+        cookie: 'session_token=stale',
+      });
+      const bounced = await fetchHtml(`http://127.0.0.1:${once.address().port}/lord/1`, {
+        cookie: null,
+      });
+
+      check('a redirect loop reads as an expired session instead of throwing', () => {
+        assert.strictEqual(looped.authExpired, true);
+        assert.strictEqual(looped.ok, false);
+        assert.strictEqual(looped.status, 0);
+      });
+
+      check('a single bounce to the login page is still an expired session', () => {
+        assert.strictEqual(bounced.status, 200, 'the redirect must resolve, not loop');
+        assert.strictEqual(bounced.authExpired, true);
+        assert.strictEqual(new URL(bounced.url).pathname, '/login');
+      });
+    } finally {
+      await new Promise((resolve) => loop.close(resolve));
+      await new Promise((resolve) => once.close(resolve));
+    }
   } catch (err) {
     failed += 1;
     console.log(`FAIL  unexpected error\n      ${err.stack}`);

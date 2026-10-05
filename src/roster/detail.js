@@ -11,6 +11,7 @@ const {
   saveNameHistory,
   parseAchievementCompletion,
 } = require('./metrics');
+const { historyEnabled, scopeLabel } = require('./scope');
 
 /**
  * Detail backfill: every field the source shows, not just the roster columns.
@@ -22,9 +23,9 @@ const {
  *
  * How far to go differs by subject, because so does what it costs:
  *
- *   server + alliance   every stored date. Two pages per alliance per date,
- *                       so the whole history stays affordable and the trends
- *                       are worth having.
+ *   server + alliance   every date on the run's list. Two pages per alliance
+ *                       per date, so a local history run stays affordable and
+ *                       the trends are worth having.
  *   players             newest date only. It is ~300 pages per date, which
  *                       over a month is the overwhelming majority of the
  *                       requests, and the roster the site displays is the
@@ -34,6 +35,13 @@ const {
  * At the default pace that is roughly 1,000 requests rather than 9,450, which
  * matters because the source rate-limits: it invalidates the session of an
  * account it decides is scraping too hard and eventually refuses it outright.
+ *
+ * Which dates the pass looks at is the ROSTER_HISTORY switch (./scope.js).
+ * Off - the deployed default - it takes the newest snapshot only, for every
+ * subject, and stops. On, it walks back through the stored dates in batches of
+ * SNAPSHOTS_PER_RUN. Server and alliance detail follow whichever list that
+ * produces, so filling in history is a matter of running this pass locally
+ * with the switch on rather than the deployed bot working backward forever.
  *
  * Three rules keep the run tractable:
  *
@@ -308,6 +316,7 @@ function allowedToRun(reason) {
 function getDetailState() {
   return {
     ...state,
+    scope: scopeLabel(),
     budgetMs: budgetMs(),
     refreshMs: refreshMs(),
     cooldownMs: cooldownMs(),
@@ -325,7 +334,9 @@ async function pendingSnapshots(server) {
   return prisma.rosterSnapshot.findMany({
     where: { serverId: server.id, status: 'COMPLETE' },
     orderBy: { snapshotDate: 'desc' },
-    take: SNAPSHOTS_PER_RUN,
+    // Latest-only runs exist to keep the current date current. Older dates are
+    // collected by a history run, which asks for a batch of them instead.
+    take: historyEnabled() ? SNAPSHOTS_PER_RUN : 1,
     select: { id: true, snapshotDate: true, scannedAt: true },
   });
 }
@@ -618,6 +629,16 @@ async function runDetail({ reason = 'manual' } = {}) {
     };
     return getDetailState();
   } catch (err) {
+    // A refused login ladder throws rather than clearing `session.valid`, so
+    // the back-off above never sees it. Without this the next scheduled run
+    // walks every configured account through a browser login again - a dozen
+    // logins at the source that has just turned all of them away.
+    if (err.code === 'SOURCE_ACCESS_DENIED') {
+      cooldownUntil = Date.now() + cooldownMs();
+      console.log(
+        `[ROSTER] Every configured account was refused; not retrying for ${Math.round(cooldownMs() / 60000)} minute(s).`,
+      );
+    }
     state = {
       running: false,
       reason,

@@ -22,6 +22,14 @@ const USER_AGENT =
 
 const FETCH_TIMEOUT_MS = 20000;
 
+/**
+ * Redirects followed before giving up.
+ *
+ * Low enough that a genuine chain resolves, low enough that a loop is caught
+ * quickly rather than after dozens of round-trips.
+ */
+const MAX_REDIRECTS = 6;
+
 /** Cookie header for the saved session, or null when there is no session yet. */
 async function cookieHeader() {
   try {
@@ -45,6 +53,13 @@ async function cookieHeader() {
  * to /. Either final URL means the body is not the page that was asked for, so
  * it is reported as `authExpired` instead of being parsed as an empty document
  * - which would otherwise be recorded as "this alliance has no stats".
+ *
+ * Redirects are followed by hand. With `redirect: 'follow'` a cookie the
+ * source has already invalidated is a 303 to / answered by another 303 to /
+ * forever, and undici abandons the request with "redirect count exceeded"
+ * rather than returning a final URL. That throw escaped `getPage`, so the
+ * recovery that would have re-logged-in never ran and the pass died with a
+ * network error instead of an expired session.
  */
 async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const headers = {
@@ -54,11 +69,27 @@ async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = 
   };
   if (cookie) headers.Cookie = cookie;
 
-  const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+  let current = url;
+  let res = null;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    res = await fetch(current, { headers, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+    const location = res.headers.get('location');
+    if (res.status < 300 || res.status >= 400 || !location) break;
+    try {
+      current = new URL(location, current).toString();
+    } catch {
+      break;
+    }
+    res = null;
+  }
+
+  // Still redirecting at the cap means the source is bouncing us in a loop,
+  // which is what a discarded cookie looks like.
+  if (!res) return { ok: false, status: 0, authExpired: true, html: '', url: current };
 
   let pathname = '';
   try {
-    pathname = new URL(res.url || url).pathname;
+    pathname = new URL(current).pathname;
   } catch {
     pathname = '';
   }
@@ -71,7 +102,7 @@ async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = 
     status: res.status,
     authExpired,
     html,
-    url: res.url || url,
+    url: current,
   };
 }
 
