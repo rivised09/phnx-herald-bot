@@ -209,6 +209,18 @@ async function getPlayerDetail(sourceId) {
   });
   if (!row) return null;
   const avatarByLord = await historicalAvatarMap(server.id, [row.lordId]);
+  const historyRows = await prisma.lordSnapshot.findMany({
+    where: {
+      lordId: row.lordId,
+      snapshot: { serverId: server.id, status: 'COMPLETE' },
+    },
+    select: {
+      power: true,
+      rank: true,
+      snapshot: { select: { snapshotDate: true } },
+    },
+    orderBy: { snapshot: { snapshotDate: 'asc' } },
+  });
   return {
     id: row.lord.sourceId.toString(),
     name: row.lord.name,
@@ -217,6 +229,11 @@ async function getPlayerDetail(sourceId) {
     avatar: row.avatarUrl || avatarByLord.get(row.lordId) || null,
     alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
     snapshotDate: row.snapshot.snapshotDate.toISOString().slice(0, 10),
+    history: historyRows.map((item) => ({
+      date: item.snapshot.snapshotDate.toISOString().slice(0, 10),
+      power: item.power === null ? null : Number(item.power),
+      rank: item.rank || null,
+    })),
     achievements: row.achievements.map((item) => ({
       name: item.name,
       progress: item.progress?.toString() || null,

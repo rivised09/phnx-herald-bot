@@ -6,6 +6,9 @@ function rosterRouter() {
 
   router.get('/players/:id', async (req, res, next) => {
     try {
+      // The lookup casts to BigInt, so anything non-numeric would otherwise
+      // surface as a 500 instead of the 404 it obviously means.
+      if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: 'Player not found' });
       const data = await getPlayerDetail(req.params.id);
       if (!data) return res.status(404).json({ error: 'Player not found' });
       return res.json(data);

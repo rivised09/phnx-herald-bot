@@ -77,6 +77,14 @@ const DEFAULT_REFRESH_MS = 6 * 60 * 60 * 1000;
  * which teaches the source nothing and keeps the refusal in place for longer.
  */
 const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
+/**
+ * How many accounts one refusal may cycle through.
+ *
+ * With a long account list the ladder below would otherwise launch a Chromium
+ * login per account - over a dozen on a single refused run, every hour - for
+ * a refusal that a couple of accounts is already enough to diagnose.
+ */
+const DEFAULT_MAX_ROTATIONS = 3;
 const SNAPSHOTS_PER_RUN = 30;
 
 function envInt(name, fallback, minimum = 1) {
@@ -94,6 +102,8 @@ const delayMs = () => envInt('ROSTER_DETAIL_DELAY_MS', DEFAULT_DELAY_MS, 0);
 const chunkSize = () => envInt('ROSTER_DETAIL_CHUNK', DEFAULT_CHUNK);
 const refreshMs = () => envInt('ROSTER_DETAIL_REFRESH_MS', DEFAULT_REFRESH_MS, 60000);
 const cooldownMs = () => envInt('ROSTER_DETAIL_COOLDOWN_MS', DEFAULT_COOLDOWN_MS, 0);
+const maxRotations = () =>
+  Math.min(accountCount() - 1, envInt('ROSTER_DETAIL_MAX_ROTATIONS', DEFAULT_MAX_ROTATIONS, 0));
 
 /**
  * Whether player detail covers every date or only the newest.
@@ -209,7 +219,7 @@ async function recover(url) {
     if (!isAuthFailure(retry)) return retry;
   }
 
-  if (attempts.rotations + 1 < accountCount()) {
+  if (attempts.rotations < maxRotations()) {
     attempts.rotations += 1;
     rotateCredentials();
     await reauthenticate();

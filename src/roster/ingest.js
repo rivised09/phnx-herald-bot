@@ -41,7 +41,6 @@ function envFlag(name) {
 
 /** How many missing dates a single run will fill in. */
 const BACKFILL_BATCH = envInt('ROSTER_BACKFILL_BATCH', 3);
-/** How many of the newest dates are eligible for backfill at all. */
 /** Re-read the newest date at least this often. */
 const REFRESH_MS = envInt('ROSTER_REFRESH_MINUTES', 240) * 60 * 1000;
 /** How long discovered dates are reused before asking the source again. */
@@ -507,8 +506,15 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
 
         const iso = state.active;
         if (!iso) {
+          // Carry the page title: "Email Verification Required" is the single
+          // most likely reason for this, and it is invisible otherwise - the
+          // page loads at the right URL with a 200, so nothing else records why.
+          const title = await page.title();
           throw new Error(
-            'The source did not identify the active snapshot date; refusing to save an unverified current roster.',
+            `The source did not identify the active snapshot date (page title: "${title}"); ` +
+              'refusing to save an unverified current roster. A title mentioning email ' +
+              'verification means the account in use has not verified its email and is ' +
+              'blocked from viewing stats.',
           );
         }
         latest = await crawlAllianceMembers(page, {
