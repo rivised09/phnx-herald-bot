@@ -16,6 +16,7 @@ const metrics = require('../src/roster/metrics');
 const extract = require('../src/roster/extract');
 const { accountCount, rotateCredentials } = require('../src/roster/session');
 const detail = require('../src/roster/detail');
+const insights = require('../src/roster/insights');
 
 const SERVER = 999999;
 const DATE = '1999-01-01';
@@ -299,6 +300,283 @@ async function main() {
       process.env.ROSTER_DETAIL_PLAYERS = 'all';
       assert.strictEqual(detail.playerDepth(), 'all');
       delete process.env.ROSTER_DETAIL_PLAYERS;
+    });
+
+    // --- player detail insights ---
+    const insightHistory = [
+      { date: '1999-01-01', power: 10000000, rank: 120 },
+      { date: '1999-01-08', power: 25000000, rank: 80 },
+      { date: '1999-01-15', power: 60000000, rank: 40 },
+    ];
+    const insightMetrics = {
+      '1999-01-08': {
+        'Units Killed': 5000000,
+        'Units Dead': 1000000,
+        'Units Healed': 1000000,
+        Merits: 15000,
+        Victories: 600,
+        Defeats: 250,
+        'City Sieges': 100,
+        'Times Scouted': 2000,
+        'Alliance Donations': 60000,
+        'Times Alliance Helps Given': 15000,
+        'Total Resources Gathered': 80000000,
+        'Building Power': 12000000,
+        'Hero Power': 9000000,
+        'Legion Power': 12000000,
+        'Tech Power': 3000000,
+        'Town Hall': 24,
+        'Seasons Played': 3,
+        'Season Victories': 30,
+        'Season Defeats': 18,
+        'Historical Highest Merits': 45000,
+        'T4/T5 Units Dead': 200000,
+      },
+      '1999-01-15': {
+        'Units Killed': 12000000,
+        'Units Dead': 2000000,
+        'Units Healed': 3000000,
+        Merits: 40000,
+        Victories: 1500,
+        Defeats: 400,
+        'City Sieges': 300,
+        'Times Scouted': 5000,
+        'Alliance Donations': 150000,
+        'Times Alliance Helps Given': 40000,
+        'Total Resources Gathered': 200000000,
+        'Building Power': 20000000,
+        'Hero Power': 15000000,
+        'Legion Power': 20000000,
+        'Tech Power': 5000000,
+        'Town Hall': 25,
+        'Seasons Played': 3,
+        'Season Victories': 40,
+        'Season Defeats': 20,
+        'Historical Highest Merits': 60000,
+        'T4/T5 Units Dead': 500000,
+      },
+    };
+    const full = insights.buildInsights({
+      history: insightHistory,
+      metricsByDate: insightMetrics,
+      serverNumber: 999999,
+      name: 'Test Lord',
+    });
+
+    check('insights marks its privacy contract', () => {
+      assert.strictEqual(full.available, true);
+      assert.strictEqual(full.privacy, 'self-comparison-only');
+      assert.ok(/own earlier readings/.test(full.narrative.privacyNote));
+    });
+
+    check('insights never emits another player or a percentile', () => {
+      const banned = [
+        'percentile',
+        'rankPercentile',
+        'vsKingdom',
+        'kingdomAverage',
+        'leaderboard',
+        'betterThan',
+        'percentOfPlayers',
+        'otherPlayers',
+      ];
+      const seen = new Set();
+      (function walk(node, path) {
+        if (node === null || typeof node !== 'object') return;
+        for (const [key, value] of Object.entries(node)) {
+          if (banned.includes(key)) seen.add(`${path}.${key}`);
+          walk(value, `${path}.${key}`);
+        }
+      })(full, 'insights');
+      assert.deepStrictEqual([...seen], []);
+    });
+
+    check('progress measures each metric over the dates it was actually read', () => {
+      assert.strictEqual(full.progress.windowDays, 14);
+      const power = full.progress.series.find((row) => row.key === 'power');
+      assert.strictEqual(power.from, 10000000);
+      assert.strictEqual(power.to, 60000000);
+      assert.strictEqual(power.delta, 50000000);
+      assert.strictEqual(power.direction, 'up');
+      const kills = full.progress.series.find((row) => row.key === 'kills');
+      assert.strictEqual(kills.fromDate, '1999-01-08');
+      assert.strictEqual(kills.delta, 7000000);
+      assert.strictEqual(kills.deltaPctText, '+140%');
+    });
+
+    check('timeline exposes one point per snapshot', () => {
+      assert.strictEqual(full.timeline.length, 3);
+      assert.strictEqual(full.timeline[0].power, 10000000);
+      assert.strictEqual(full.timeline[0].kills, null);
+      assert.strictEqual(full.timeline[2].kills, 12000000);
+    });
+
+    check('efficiency ratios are derived from this player alone', () => {
+      const killDeath = full.efficiency.find((row) => row.key === 'killDeath');
+      assert.strictEqual(killDeath.value, 6);
+      const winRate = full.efficiency.find((row) => row.key === 'winRate');
+      assert.ok(Math.abs(winRate.value - 1500 / 1900) < 1e-6);
+      assert.strictEqual(full.efficiency.find((row) => row.key === 'healDeath').value, 1.5);
+    });
+
+    check('playstyle resolves to a known archetype', () => {
+      const known = ['Warlord', 'Guardian', 'Architect', 'Rallyer', 'Settler', 'Rising Star', 'All-Rounder'];
+      assert.ok(known.includes(full.playstyle.label), `got ${full.playstyle.label}`);
+      assert.strictEqual(full.playstyle.available, true);
+      assert.ok(full.playstyle.blurb.length > 0);
+      assert.ok(full.playstyle.strengths.length > 0);
+      assert.ok(full.playstyle.growth.length > 0);
+    });
+
+    check('profile signals carry a level and a reason', () => {
+      assert.strictEqual(full.profile.length, 5);
+      for (const item of full.profile) {
+        assert.ok(['strong', 'good', 'steady', 'building', 'new', 'unknown'].includes(item.level));
+        assert.ok(item.reason.length > 0);
+      }
+      assert.ok(full.profile.some((item) => item.key === 'growth' && item.level === 'strong'));
+    });
+
+    check('milestones always target round numbers', () => {
+      const power = full.milestones.find((row) => row.key === 'power');
+      assert.strictEqual(power.current, 60000000);
+      assert.strictEqual(power.target, 100000000);
+      assert.strictEqual(power.remaining, 40000000);
+      assert.ok(power.pct > 0 && power.pct < 100);
+      assert.strictEqual(insights.nextRound(60000000), 100000000);
+      assert.strictEqual(insights.nextRound(0), 1000);
+      assert.ok(insights.nextRound(999999999) > 999999999);
+    });
+
+    check('site badges use absolute thresholds only', () => {
+      const power50m = full.achievements.find((row) => row.key === 'power-50m');
+      assert.strictEqual(power50m.earned, true);
+      assert.strictEqual(power50m.earnedOn, '1999-01-15');
+      const power1b = full.achievements.find((row) => row.key === 'power-1b');
+      assert.strictEqual(power1b.earned, false);
+      const kills1m = full.achievements.find((row) => row.key === 'kills-1m');
+      assert.strictEqual(kills1m.earnedOn, '1999-01-08');
+      const seasons3 = full.achievements.find((row) => row.key === 'seasons-3');
+      assert.strictEqual(seasons3.earned, true);
+    });
+
+    check('season journey summarises the account record', () => {
+      assert.strictEqual(full.seasonJourney.available, true);
+      assert.strictEqual(full.seasonJourney.seasonsPlayed, 3);
+      assert.strictEqual(full.seasonJourney.winrateText, '67%');
+      assert.strictEqual(full.seasonJourney.tier, 'Veteran');
+      assert.strictEqual(full.seasonJourney.bestMeritsText, '60K');
+    });
+
+    check('gains and comparison stay inside the tracked window', () => {
+      assert.ok(full.gains.length >= 2);
+      const powerGain = full.gains.find((row) => row.key === 'power');
+      assert.strictEqual(powerGain.delta, 50000000);
+      assert.strictEqual(full.comparison.available, true);
+      assert.ok(full.comparison.periods.every((row) => row.recentDate >= row.previousDate));
+      assert.ok(/no other account/.test(full.comparison.narrative));
+    });
+
+    check('activity ranks each area against the player own prior pace', () => {
+      assert.strictEqual(full.activity.available, true);
+      assert.strictEqual(full.activity.areas.length, 5);
+      const combat = full.activity.areas.find((row) => row.key === 'combat');
+      assert.ok(['surging', 'active', 'steady', 'quiet', 'idle'].includes(combat.level));
+    });
+
+    check('a season reset is reported as a reset, not a loss', () => {
+      const beforeSeason = {
+        '1999-01-08': { Merits: 166571, 'Seasons Played': 2, 'Units Killed': 650889 },
+        '1999-01-15': { Merits: 166571, 'Seasons Played': 2, 'Units Killed': 660640 },
+      };
+      const afterSeason = {
+        '1999-01-08': { Merits: 166571, 'Seasons Played': 2, 'Units Killed': 650889 },
+        '1999-01-15': { Merits: 0, 'Seasons Played': 3, 'Units Killed': 660640 },
+      };
+      const rolled = insights.buildInsights({ history: insightHistory, metricsByDate: afterSeason });
+      const unchanged = insights.buildInsights({ history: insightHistory, metricsByDate: beforeSeason });
+
+      const merits = rolled.progress.series.find((row) => row.key === 'merits');
+      assert.strictEqual(merits.direction, 'reset');
+      assert.strictEqual(merits.deltaPctText, 'new season');
+      assert.strictEqual(merits.deltaText, null);
+      assert.strictEqual(merits.better, null);
+      assert.ok(/new season opened/.test(merits.note));
+
+      assert.strictEqual(rolled.coverage.seasonReset, true);
+      assert.strictEqual(unchanged.coverage.seasonReset, false);
+      assert.ok(/new season opened/.test(rolled.narrative.summary));
+
+      assert.strictEqual(rolled.milestones.find((row) => row.key === 'merits'), undefined);
+      assert.strictEqual(rolled.gains.find((row) => row.key === 'merits'), undefined);
+      const comparison = rolled.comparison.periods.find((row) => row.key === 'merits');
+      assert.strictEqual(comparison.direction, 'reset');
+      assert.strictEqual(comparison.better, null);
+      assert.strictEqual(rolled.efficiency.find((row) => row.key === 'meritPower'), undefined);
+
+      const k = rolled.comparison.periods.find((row) => row.key === 'kills');
+      assert.strictEqual(k.better, true);
+      const rank = rolled.progress.series.find((row) => row.key === 'rank');
+      assert.strictEqual(rank.better, true);
+    });
+
+    check('activity pairs the dates each area was measured', () => {
+      const gapped = insights.buildInsights({
+        history: [
+          { date: '1999-01-01', power: 10000000, rank: 120 },
+          { date: '1999-01-08', power: 25000000, rank: 80 },
+          { date: '1999-01-15', power: 60000000, rank: 40 },
+        ],
+        metricsByDate: {
+          '1999-01-01': { 'Units Killed': 1000000, Victories: 100, Defeats: 50 },
+          '1999-01-15': { 'Units Killed': 3000000, Victories: 400, Defeats: 60 },
+        },
+      });
+      const combat = gapped.activity.areas.find((row) => row.key === 'combat');
+      assert.notStrictEqual(combat.level, 'unknown');
+      assert.strictEqual(combat.readings, 2);
+      assert.strictEqual(gapped.activity.available, true);
+    });
+
+    check('power-only history degrades instead of inventing zeros', () => {
+      const bare = insights.buildInsights({ history: insightHistory, metricsByDate: {} });
+      assert.strictEqual(bare.available, true);
+      assert.strictEqual(bare.coverage.hasDetail, false);
+      assert.strictEqual(bare.coverage.hasCombat, false);
+      assert.deepStrictEqual(bare.coverage.missing, ['combat', 'sustain', 'gathering']);
+      assert.strictEqual(bare.efficiency.length, 0);
+      assert.strictEqual(bare.seasonJourney.available, false);
+      const known = bare.activity.areas.filter((row) => row.level !== 'unknown');
+      assert.deepStrictEqual(known.map((row) => row.key), ['growth']);
+      assert.strictEqual(bare.playstyle.key, 'riser');
+      assert.ok(bare.milestones.find((row) => row.key === 'power'));
+      assert.strictEqual(bare.milestones.filter((row) => row.key === 'kills').length, 0);
+      assert.strictEqual(bare.progress.series.map((row) => row.key).join(','), 'power,rank');
+    });
+
+    check('a single snapshot yields no progress or comparison', () => {
+      const one = insights.buildInsights({ history: [insightHistory[0]], metricsByDate: {} });
+      assert.strictEqual(one.progress.series.length, 0);
+      assert.strictEqual(one.comparison.available, false);
+      assert.strictEqual(one.activity.available, false);
+      assert.strictEqual(one.available, true);
+    });
+
+    check('an empty history reports why rather than throwing', () => {
+      assert.deepStrictEqual(insights.buildInsights({}), { available: false, reason: 'no_history' });
+    });
+
+    check('flatten accepts both metric shapes', () => {
+      const sectioned = { 'War Stats': [{ label: 'Units Killed', number: 12, text: '12', unit: null }] };
+      assert.deepStrictEqual(insights.flatten(sectioned), { 'Units Killed': 12 });
+      assert.deepStrictEqual(insights.flatten({ 'Units Killed': '1,234' }), { 'Units Killed': 1234 });
+      assert.deepStrictEqual(insights.flatten({ Odd: 'Silver III' }), {});
+    });
+
+    check('compact abbreviates without losing magnitude', () => {
+      assert.strictEqual(insights.compact(60000000), '60M');
+      assert.strictEqual(insights.compact(950), '950');
+      assert.strictEqual(insights.compact(null), null);
     });
   } catch (err) {
     failed += 1;

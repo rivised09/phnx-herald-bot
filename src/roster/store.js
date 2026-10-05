@@ -1,5 +1,6 @@
 const prisma = require('../db');
 const { serverId, sourceUrl } = require('./v1');
+const { buildInsights } = require('./insights');
 
 /**
  * Read path for the v1 home roster: the database only.
@@ -194,6 +195,36 @@ async function latestSnapshot(serverIdValue) {
   });
 }
 
+/**
+ * Detail metrics are only ever written for the players whose detail page the
+ * background pass has actually read, so a miss here is normal and means "not
+ * measured yet" - never zero.
+ */
+async function loadPlayerMetrics(serverIdValue, lordId) {
+  const rows = await prisma.snapshotMetric.findMany({
+    where: {
+      subjectType: 'LORD',
+      subjectId: lordId,
+      snapshot: { serverId: serverIdValue, status: 'COMPLETE' },
+    },
+    select: {
+      label: true,
+      valueNumber: true,
+      valueText: true,
+      snapshot: { select: { snapshotDate: true } },
+    },
+    orderBy: { snapshot: { snapshotDate: 'asc' } },
+  });
+  const byDate = {};
+  for (const row of rows) {
+    const date = row.snapshot.snapshotDate.toISOString().slice(0, 10);
+    if (!byDate[date]) byDate[date] = {};
+    const value = row.valueNumber !== null ? row.valueNumber : row.valueText;
+    if (value !== null && value !== undefined) byDate[date][row.label] = value;
+  }
+  return byDate;
+}
+
 async function getPlayerDetail(sourceId) {
   const server = await prisma.sourceServer.findUnique({
     where: { serverNumber: Number(serverId()) },
@@ -221,6 +252,19 @@ async function getPlayerDetail(sourceId) {
     },
     orderBy: { snapshot: { snapshotDate: 'asc' } },
   });
+  const history = historyRows.map((item) => ({
+    date: item.snapshot.snapshotDate.toISOString().slice(0, 10),
+    power: item.power === null ? null : Number(item.power),
+    rank: item.rank || null,
+  }));
+  const metricsByDate = await loadPlayerMetrics(server.id, row.lordId);
+  const insights = buildInsights({
+    history,
+    metricsByDate,
+    serverNumber: Number(serverId()),
+    name: row.lord.name,
+  });
+
   return {
     id: row.lord.sourceId.toString(),
     name: row.lord.name,
@@ -229,11 +273,8 @@ async function getPlayerDetail(sourceId) {
     avatar: row.avatarUrl || avatarByLord.get(row.lordId) || null,
     alliance: row.alliance ? { id: row.alliance.name, name: row.alliance.name } : null,
     snapshotDate: row.snapshot.snapshotDate.toISOString().slice(0, 10),
-    history: historyRows.map((item) => ({
-      date: item.snapshot.snapshotDate.toISOString().slice(0, 10),
-      power: item.power === null ? null : Number(item.power),
-      rank: item.rank || null,
-    })),
+    history,
+    insights,
     achievements: row.achievements.map((item) => ({
       name: item.name,
       progress: item.progress?.toString() || null,
