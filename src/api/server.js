@@ -7,8 +7,6 @@ const channelsRouter = require('./routes/channels');
 const sheetsRouter = require('./routes/sheets');
 const settingsRouter = require('./routes/settings');
 const almanacRouter = require('./routes/almanac');
-const homeRouter = require('./routes/home');
-const rosterRouter = require('./routes/roster');
 
 function createApp(context) {
   const app = express();
@@ -21,8 +19,6 @@ function createApp(context) {
   app.use('/api/sheets', sheetsRouter());
   app.use('/api/settings', settingsRouter());
   app.use('/api/almanac', almanacRouter());
-  app.use('/api/home', homeRouter());
-  app.use('/api/roster', rosterRouter());
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

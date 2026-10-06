@@ -289,6 +289,26 @@ function dayStart(iso) {
   return new Date(`${iso}T00:00:00.000Z`);
 }
 
+/**
+ * The row backing one date, or the newest row when `iso` is null.
+ *
+ * Both reads are the same query apart from the date filter and the ordering,
+ * and the profile issues them together rather than one after the other: the
+ * picker always needs the full date list, and the body needs whichever date
+ * ends up winning. Each round trip here is a network hop, so collapsing them
+ * is the cheapest latency this page can buy.
+ */
+function lordRowFor(lordId, serverIdValue, iso = null) {
+  const snapshot = { serverId: serverIdValue, status: 'COMPLETE' };
+  if (iso) snapshot.snapshotDate = dayStart(iso);
+
+  return prisma.lordSnapshot.findFirst({
+    where: { lordId, snapshot },
+    ...(iso ? {} : { orderBy: { snapshot: { snapshotDate: 'desc' } } }),
+    include: { lord: true, alliance: true, achievements: true, snapshot: true },
+  });
+}
+
 /** Keeps only the dates that are at or before `iso`, so nothing later shows. */
 function upTo(byDate, iso) {
   const out = {};
@@ -310,24 +330,33 @@ function upTo(byDate, iso) {
  * The dates the picker offers come from the same player's own rows, newest
  * first; a player who only appears on one date gets one option and the web UI
  * hides the control.
+ *
+ * The queries are grouped into the fewest stages the result shape allows -
+ * three instead of the seven it would take written top to bottom - because the
+ * whole route is blocked on this function and every stage is a round trip.
  */
 async function getPlayerDetail(sourceId, { date = null } = {}) {
-  const server = await prisma.sourceServer.findUnique({
-    where: { serverNumber: Number(serverId()) },
-  });
-  if (!server) return null;
+  const serverNumber = Number(serverId());
 
+  // The server row is only ever used for its id, so it is read through the
+  // player instead of as a lookup of its own. An unknown server and an unknown
+  // player both mean "no such profile" and answer identically.
   const lord = await prisma.lord.findFirst({
-    where: { serverId: server.id, sourceId: BigInt(sourceId) },
-    select: { id: true },
+    where: { sourceId: BigInt(sourceId), server: { serverNumber } },
+    select: { id: true, serverId: true },
   });
   if (!lord) return null;
 
-  const dated = await prisma.lordSnapshot.findMany({
-    where: { lordId: lord.id, snapshot: { serverId: server.id, status: 'COMPLETE' } },
-    select: { snapshot: { select: { snapshotDate: true } } },
-    orderBy: { snapshot: { snapshotDate: 'desc' } },
-  });
+  const requested = snapshotDateParam(date);
+  const [dated, optimisticRow] = await Promise.all([
+    prisma.lordSnapshot.findMany({
+      where: { lordId: lord.id, snapshot: { serverId: lord.serverId, status: 'COMPLETE' } },
+      select: { snapshot: { select: { snapshotDate: true } } },
+      orderBy: { snapshot: { snapshotDate: 'desc' } },
+    }),
+    lordRowFor(lord.id, lord.serverId, requested),
+  ]);
+
   const snapshotDates = [];
   for (const item of dated) {
     const iso = isoDay(item.snapshot.snapshotDate);
@@ -337,31 +366,33 @@ async function getPlayerDetail(sourceId, { date = null } = {}) {
 
   // A date with no row for this player falls back to the newest one: the page
   // must still render rather than 404 because a link outlived the snapshot.
-  const requested = snapshotDateParam(date);
   const wanted = requested && snapshotDates.includes(requested) ? requested : snapshotDates[0];
-
-  const row = await prisma.lordSnapshot.findFirst({
-    where: {
-      lordId: lord.id,
-      snapshot: { serverId: server.id, status: 'COMPLETE', snapshotDate: dayStart(wanted) },
-    },
-    include: { lord: true, alliance: true, achievements: true, snapshot: true },
-  });
+  let row = optimisticRow;
+  if (!row || isoDay(row.snapshot.snapshotDate) !== wanted) {
+    row = await lordRowFor(lord.id, lord.serverId, wanted);
+  }
   if (!row) return null;
 
-  const avatarByLord = await historicalAvatarMap(server.id, [row.lordId]);
-  const historyRows = await prisma.lordSnapshot.findMany({
-    where: {
-      lordId: row.lordId,
-      snapshot: { serverId: server.id, status: 'COMPLETE' },
-    },
-    select: {
-      power: true,
-      rank: true,
-      snapshot: { select: { snapshotDate: true } },
-    },
-    orderBy: { snapshot: { snapshotDate: 'asc' } },
-  });
+  // Nothing below depends on anything else in this group, so they travel
+  // together: the avatar history, the power/rank series and the metric rows
+  // that feed the insights.
+  const [avatarByLord, historyRows, metricBuckets] = await Promise.all([
+    historicalAvatarMap(lord.serverId, [row.lordId]),
+    prisma.lordSnapshot.findMany({
+      where: {
+        lordId: row.lordId,
+        snapshot: { serverId: lord.serverId, status: 'COMPLETE' },
+      },
+      select: {
+        power: true,
+        rank: true,
+        snapshot: { select: { snapshotDate: true } },
+      },
+      orderBy: { snapshot: { snapshotDate: 'asc' } },
+    }),
+    loadPlayerMetrics(lord.serverId, row.lordId, { snapshotDate: wanted }),
+  ]);
+
   const history = historyRows
     .map((item) => ({
       date: item.snapshot.snapshotDate.toISOString().slice(0, 10),
@@ -370,15 +401,14 @@ async function getPlayerDetail(sourceId, { date = null } = {}) {
     }))
     .filter((point) => point.date <= wanted);
 
-  const { metrics: allMetrics, radar: allRadar, sections, sectionsDate } =
-    await loadPlayerMetrics(server.id, row.lordId, { snapshotDate: wanted });
+  const { metrics: allMetrics, radar: allRadar, sections, sectionsDate } = metricBuckets;
   const metricsByDate = upTo(allMetrics, wanted);
   const radarByDate = upTo(allRadar, wanted);
   const insights = buildInsights({
     history,
     metricsByDate,
     radarByDate,
-    serverNumber: Number(serverId()),
+    serverNumber,
     name: row.lord.name,
   });
 
@@ -406,36 +436,39 @@ async function getPlayerDetail(sourceId, { date = null } = {}) {
   };
 }
 
+/**
+ * An alliance's newest stored figures and the members in them.
+ *
+ * The alliance, its latest row and the server they belong to collapse into one
+ * read: the relation filters do the scoping that three separate lookups used to
+ * do, so an alliance from another server or one with no stored snapshot simply
+ * finds nothing and answers 404 like before. Only the member list still needs
+ * its own round trip, and it has to wait for the row it hangs off.
+ */
 async function getAllianceDetail(id) {
-  const server = await prisma.sourceServer.findUnique({
-    where: { serverNumber: Number(serverId()) },
-  });
-  if (!server) return null;
-  const alliance = await prisma.alliance.findFirst({
-    where: { serverId: server.id, id },
-  });
-  if (!alliance) return null;
   const row = await prisma.allianceSnapshot.findFirst({
     where: {
-      allianceId: alliance.id,
-      snapshot: { serverId: server.id, status: 'COMPLETE' },
+      allianceId: id,
+      alliance: { server: { serverNumber: Number(serverId()) } },
+      snapshot: { status: 'COMPLETE' },
     },
-    include: { snapshot: true },
+    include: { alliance: true, snapshot: true },
     orderBy: { snapshot: { snapshotDate: 'desc' } },
   });
   if (!row) return null;
+
   const snapshot = row.snapshot;
   const members = await prisma.lordSnapshot.findMany({
-    where: { snapshotId: snapshot.id, allianceId: alliance.id },
+    where: { snapshotId: snapshot.id, allianceId: row.allianceId },
     include: { lord: true },
     orderBy: { rank: 'asc' },
   });
   return {
-    id: alliance.id,
-    name: alliance.name,
-    rank: row?.rank || null,
-    power: formatStat(row?.power),
-    memberCount: row?.memberCount || members.length,
+    id: row.alliance.id,
+    name: row.alliance.name,
+    rank: row.rank || null,
+    power: formatStat(row.power),
+    memberCount: row.memberCount || members.length,
     snapshotDate: snapshot.snapshotDate.toISOString().slice(0, 10),
     players: members.map((item) => ({
       id: item.lord.sourceId.toString(),

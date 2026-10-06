@@ -75,6 +75,10 @@ async function saveSubjectMetrics(snapshotId, subjectType, subjectId, rows) {
     subjectType,
     subjectId: subjectId || '',
   }));
+  // Two statements, but two round trips: the same Supabase latency that makes
+  // a snapshot write need a longer budget applies here, and a subject that
+  // loses its transaction mid-run would abort the whole detail pass.
+  const options = { maxWait: 15000, timeout: 60000 };
   await prisma.$transaction(async (tx) => {
     await tx.snapshotMetric.deleteMany({
       where: { snapshotId, subjectType, subjectId: subjectId || '' },
@@ -82,7 +86,7 @@ async function saveSubjectMetrics(snapshotId, subjectType, subjectId, rows) {
     if (data.length) {
       await tx.snapshotMetric.createMany({ data });
     }
-  });
+  }, options);
   return data.length;
 }
 
@@ -122,7 +126,7 @@ async function saveAchievements(lordSnapshotId, rows) {
   await prisma.$transaction(async (tx) => {
     await tx.lordAchievement.deleteMany({ where: { lordSnapshotId } });
     if (data.length) await tx.lordAchievement.createMany({ data });
-  });
+  }, { maxWait: 15000, timeout: 60000 });
   return data.length;
 }
 

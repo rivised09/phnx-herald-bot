@@ -248,6 +248,15 @@ async function loadExisting(server) {
   return map;
 }
 
+/**
+ * A full current snapshot is hundreds of rows and every statement below is a
+ * round trip to Supabase, so the write needs far more than Prisma's five
+ * second interactive-transaction default. When that default expires Prisma
+ * aborts the transaction and the next statement reports P2028 - "transaction
+ * not found" - which reads like a dropped connection but is a timeout.
+ */
+const SNAPSHOT_TRANSACTION = { maxWait: 15000, timeout: 300000 };
+
 /** Replaces the snapshot's rows outright, so a re-ingest cannot leave stale ones. */
 async function saveSnapshot({ server, isoDate, status, url, alliances, players }) {
   return prisma.$transaction(async (tx) => {
@@ -374,12 +383,6 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
           rank: entity.rank ?? i + 1,
           scannedAt: knownAlliances.get(allianceIds.get(entity.name)) || null,
         })),
-      }, {
-        // A full current snapshot can contain hundreds of lord rows. Keep the
-        // replacement atomic, but do not let Prisma's five-second interactive
-        // transaction default close it while the database is still working.
-        maxWait: 15000,
-        timeout: 300000,
       });
     }
 
@@ -402,7 +405,7 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
     }
 
     return snapshot;
-  });
+  }, SNAPSHOT_TRANSACTION);
 }
 
 /**
