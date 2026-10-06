@@ -4,6 +4,8 @@ const {
   setAutoRefreshConfig,
   MIN_INTERVAL_MS,
   MAX_INTERVAL_MS,
+  getRowRoster,
+  setRowRoster,
 } = require('../../settings');
 const { requireAccessCode } = require('../../auth/accessCode');
 const { getFetchState, startTargetedFetch } = require('../../roster/fetch');
@@ -22,6 +24,7 @@ function settingsRouter() {
       const autoRefresh = await getAutoRefreshConfig();
       res.json({
         autoRefresh,
+        rowRoster: await getRowRoster(),
         fetch: getFetchState(),
         limits: { minIntervalMs: MIN_INTERVAL_MS, maxIntervalMs: MAX_INTERVAL_MS },
       });
@@ -37,6 +40,10 @@ function settingsRouter() {
 
       if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
       if (body.intervalMs !== undefined) patch.intervalMs = body.intervalMs;
+      if (body.rowRoster !== undefined) {
+        const rowRoster = await setRowRoster(body.rowRoster);
+        return res.json({ rowRoster });
+      }
 
       if (Object.keys(patch).length === 0) {
         return res.status(400).json({ error: 'Nothing to update.' });
