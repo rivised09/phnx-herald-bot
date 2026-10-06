@@ -201,6 +201,8 @@ model Lord {
   serverId  String   @map("server_id")
   sourceId  BigInt   @map("source_id")
   name      String
+  discordId String?  @map("discord_id") @db.VarChar(40)
+  discordName String? @map("discord_name") @db.VarChar(100)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

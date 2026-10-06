@@ -11,7 +11,9 @@
  * recorded in the database, so a second pass spends its time on whatever the
  * first one ran out of budget for.
  */
-process.env.ROSTER_HISTORY = '1';
+const latestOnly = process.argv.includes('--latest');
+
+if (!latestOnly) process.env.ROSTER_HISTORY = '1';
 
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });

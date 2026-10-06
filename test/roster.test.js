@@ -300,6 +300,52 @@ async function main() {
       assert.strictEqual(infantry.target, 50000000n);
     });
 
+    // The rows these lists hang off are replaced by every re-ingest, while
+    // `scannedAt` carries over - so a roster refresh used to empty the lists
+    // for a date and leave the detail pass convinced the pages were read.
+    const zedRow = await prisma.lordSnapshot.findFirst({
+      where: { snapshotId: snapshot.id, lord: { sourceId: 1001n } },
+      select: { id: true },
+    });
+    const beforeRewrite = await prisma.lordAchievement.count({
+      where: { lordSnapshot: { snapshotId: snapshot.id } },
+    });
+    await metrics.saveAchievements(zedRow.id, [
+      { name: 'Power Pursuit', progress: '1,000', ...metrics.parseAchievementCompletion('Not Completed (50,000,000)') },
+    ]);
+
+    await saveSnapshot({
+      server,
+      isoDate: DATE,
+      status: 'COMPLETE',
+      url: 'u',
+      alliances: ALLIANCES,
+      players: [
+        ...PLAYERS,
+        // Same power the manual row above wrote, so the series test below still
+        // reads the date it expects.
+        { id: '25615899', name: 'riv', allianceId: '[BBB] Beta', stats: { Rank: '3', Power: '18,300,813' }, avatar: null },
+      ],
+    });
+    const carried = await prisma.lordAchievement.findMany({
+      where: { lordSnapshot: { snapshotId: snapshot.id } },
+      select: {
+        name: true,
+        progress: true,
+        target: true,
+        lordSnapshot: { select: { lord: { select: { sourceId: true } } } },
+      },
+    });
+    const carriedForZed = carried.filter((row) => row.lordSnapshot.lord.sourceId === 1001n);
+
+    check('a re-ingest carries achievements across the rewrite', () => {
+      assert.strictEqual(carried.length, beforeRewrite + 1, 'every stored achievement survives');
+      assert.strictEqual(carriedForZed.length, 1);
+      assert.strictEqual(carriedForZed[0].name, 'Power Pursuit');
+      assert.strictEqual(carriedForZed[0].progress, 1000n);
+      assert.strictEqual(carriedForZed[0].target, 50000000n);
+    });
+
     // --- name history ---
     await metrics.saveNameHistory(lord.id, ['riv', 'OldName', 'riv']);
     const history = await prisma.lordNameHistory.findMany({ where: { lordId: lord.id } });

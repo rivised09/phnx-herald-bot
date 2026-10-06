@@ -257,6 +257,13 @@ async function loadExisting(server) {
  */
 const SNAPSHOT_TRANSACTION = { maxWait: 15000, timeout: 300000 };
 
+/**
+ * Rows per createMany when achievements are put back onto the rewritten rows.
+ * Postgres caps a statement at 65,535 bind parameters, and a full roster of
+ * achievement lists can pass that in one go.
+ */
+const ACHIEVEMENT_CARRY_CHUNK = 500;
+
 /** Replaces the snapshot's rows outright, so a re-ingest cannot leave stale ones. */
 async function saveSnapshot({ server, isoDate, status, url, alliances, players }) {
   return prisma.$transaction(async (tx) => {
@@ -297,6 +304,37 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
       select: { allianceId: true, scannedAt: true },
     });
     const knownAlliances = new Map(previousAlliances.map((row) => [row.allianceId, row.scannedAt]));
+
+    // Achievement lists hang off these rows and vanish with them on the delete
+    // below, while `scannedAt` is carried over: a re-ingest therefore emptied
+    // every list for the date and left the detail pass convinced the pages had
+    // already been read, so nothing refilled them. They are read here and put
+    // back against the new ids at the end of the transaction; only players the
+    // roster no longer contains lose theirs.
+    const carriedAchievements = new Map();
+    const carriedRows = await tx.lordAchievement.findMany({
+      where: { lordSnapshot: { snapshotId: snapshot.id } },
+      select: {
+        name: true,
+        progress: true,
+        target: true,
+        completedText: true,
+        completedAt: true,
+        lordSnapshot: { select: { lordId: true } },
+      },
+    });
+    carriedRows.forEach((row) => {
+      const lordId = row.lordSnapshot.lordId;
+      const list = carriedAchievements.get(lordId) || [];
+      list.push({
+        name: row.name,
+        progress: row.progress,
+        target: row.target,
+        completedText: row.completedText,
+        completedAt: row.completedAt,
+      });
+      carriedAchievements.set(lordId, list);
+    });
 
     await tx.allianceSnapshot.deleteMany({ where: { snapshotId: snapshot.id } });
     await tx.lordSnapshot.deleteMany({ where: { snapshotId: snapshot.id } });
@@ -402,6 +440,25 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
           };
         }),
       });
+    }
+
+    // Put the carried achievement lists back on the rows just created. The ids
+    // are new, so they have to be read back before they can be referenced;
+    // lords that left the roster have no row here and take theirs with them.
+    if (carriedAchievements.size) {
+      const freshRows = await tx.lordSnapshot.findMany({
+        where: { snapshotId: snapshot.id },
+        select: { id: true, lordId: true },
+      });
+      const carried = freshRows.flatMap((row) =>
+        (carriedAchievements.get(row.lordId) || []).map((achievement) => ({
+          ...achievement,
+          lordSnapshotId: row.id,
+        })),
+      );
+      for (let i = 0; i < carried.length; i += ACHIEVEMENT_CARRY_CHUNK) {
+        await tx.lordAchievement.createMany({ data: carried.slice(i, i + ACHIEVEMENT_CARRY_CHUNK) });
+      }
     }
 
     return snapshot;
