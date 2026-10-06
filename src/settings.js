@@ -3,6 +3,7 @@ const { CONFIG } = require('./config');
 
 const AUTO_REFRESH_KEY = `sheets_auto_refresh:${CONFIG.DISCORD.GUILD_ID}`;
 const ROW_ROSTER_KEY = `row_roster:${CONFIG.DISCORD.GUILD_ID}`;
+const crypto = require('crypto');
 
 const DEFAULTS = {
   enabled: true,
@@ -55,13 +56,20 @@ async function setAutoRefreshConfig(patch = {}) {
 }
 
 async function getRowRoster() {
+  const rosters = await getRowRosters();
+  return rosters[0] || null;
+}
+
+async function getRowRosters() {
   const row = await prisma.setting.findUnique({ where: { key: ROW_ROSTER_KEY } });
-  if (!row) return null;
+  if (!row) return [];
   try {
-    return JSON.parse(row.value);
+    const parsed = JSON.parse(row.value);
+    if (Array.isArray(parsed)) return parsed;
+    return parsed?.teams ? [{ ...parsed, id: parsed.id || crypto.randomUUID(), name: parsed.name || 'Saved roster' }] : [];
   } catch (err) {
     console.warn('[SETTINGS] Saved RoW roster is invalid:', err.message);
-    return null;
+    return [];
   }
 }
 
@@ -72,16 +80,28 @@ async function setRowRoster(roster) {
     throw err;
   }
 
+  const rosters = (await getRowRosters()).filter((item) => item.id !== roster.id);
+  const saved = {
+    ...roster,
+    id: roster.id || crypto.randomUUID(),
+    name: String(roster.name || 'Saved roster').trim() || 'Saved roster',
+  };
+  rosters.unshift(saved);
   await prisma.setting.upsert({
     where: { key: ROW_ROSTER_KEY },
-    create: { key: ROW_ROSTER_KEY, value: JSON.stringify(roster) },
-    update: { value: JSON.stringify(roster) },
+    create: { key: ROW_ROSTER_KEY, value: JSON.stringify(rosters) },
+    update: { value: JSON.stringify(rosters) },
   });
-  return roster;
+  return saved;
 }
 
-async function deleteRowRoster() {
-  await prisma.setting.deleteMany({ where: { key: ROW_ROSTER_KEY } });
+async function deleteRowRoster(id) {
+  const rosters = (await getRowRosters()).filter((item) => item.id !== id);
+  if (rosters.length) {
+    await prisma.setting.update({ where: { key: ROW_ROSTER_KEY }, data: { value: JSON.stringify(rosters) } });
+  } else {
+    await prisma.setting.deleteMany({ where: { key: ROW_ROSTER_KEY } });
+  }
 }
 
 module.exports = {
@@ -91,6 +111,7 @@ module.exports = {
   MAX_INTERVAL_MS,
   DEFAULTS,
   getRowRoster,
+  getRowRosters,
   setRowRoster,
   deleteRowRoster,
 };

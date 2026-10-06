@@ -5,6 +5,7 @@ const {
   MIN_INTERVAL_MS,
   MAX_INTERVAL_MS,
   getRowRoster,
+  getRowRosters,
   setRowRoster,
   deleteRowRoster,
 } = require('../../settings');
@@ -26,6 +27,7 @@ function settingsRouter() {
       res.json({
         autoRefresh,
         rowRoster: await getRowRoster(),
+        rowRosters: await getRowRosters(),
         fetch: getFetchState(),
         limits: { minIntervalMs: MIN_INTERVAL_MS, maxIntervalMs: MAX_INTERVAL_MS },
       });
@@ -59,7 +61,7 @@ function settingsRouter() {
     '/',
     requireAccessCode,
     asyncHandler(async (req, res) => {
-      await deleteRowRoster();
+      await deleteRowRoster(req.body?.id);
       res.json({ deleted: true });
     }),
   );
