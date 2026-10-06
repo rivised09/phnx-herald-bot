@@ -6,6 +6,7 @@ const {
   MAX_INTERVAL_MS,
   getRowRoster,
   setRowRoster,
+  deleteRowRoster,
 } = require('../../settings');
 const { requireAccessCode } = require('../../auth/accessCode');
 const { getFetchState, startTargetedFetch } = require('../../roster/fetch');
@@ -51,6 +52,15 @@ function settingsRouter() {
 
       const autoRefresh = await setAutoRefreshConfig(patch);
       res.json({ autoRefresh });
+    }),
+  );
+
+  router.delete(
+    '/',
+    requireAccessCode,
+    asyncHandler(async (req, res) => {
+      await deleteRowRoster();
+      res.json({ deleted: true });
     }),
   );
 

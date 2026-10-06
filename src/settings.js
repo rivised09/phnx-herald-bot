@@ -71,12 +71,17 @@ async function setRowRoster(roster) {
     err.code = 'INVALID_ROSTER';
     throw err;
   }
+
   await prisma.setting.upsert({
     where: { key: ROW_ROSTER_KEY },
     create: { key: ROW_ROSTER_KEY, value: JSON.stringify(roster) },
     update: { value: JSON.stringify(roster) },
   });
   return roster;
+}
+
+async function deleteRowRoster() {
+  await prisma.setting.deleteMany({ where: { key: ROW_ROSTER_KEY } });
 }
 
 module.exports = {
@@ -87,4 +92,5 @@ module.exports = {
   DEFAULTS,
   getRowRoster,
   setRowRoster,
+  deleteRowRoster,
 };
