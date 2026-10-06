@@ -252,6 +252,12 @@ function sessionAccepted(page, target) {
   }
 }
 
+async function protectedPageAccepted(page, target) {
+  if (!sessionAccepted(page, target)) return false;
+  const title = (await page.title().catch(() => '')).toLowerCase();
+  return !title.includes('email verification') && !title.includes('access denied');
+}
+
 async function login(page, { username, password }) {
   await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT_MS });
 
@@ -306,9 +312,9 @@ async function withAuthedPage(work) {
             // page. Probe the protected server route before accepting cookies.
             const target = probeUrl();
             await page.goto(target, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT_MS });
-            if (!sessionAccepted(page, target)) {
+            if (!(await protectedPageAccepted(page, target))) {
               const err = new Error(
-                'CallOfStats accepted the form but denied access to the protected server route.',
+                `CallOfStats accepted the form but the protected server route is unavailable (page title: "${await page.title()}").`,
               );
               err.code = 'SOURCE_ACCESS_DENIED';
               throw err;
@@ -328,7 +334,7 @@ async function withAuthedPage(work) {
       try {
         const target = probeUrl();
         await page.goto(target, { waitUntil: 'domcontentloaded' });
-        if (!sessionAccepted(page, target)) {
+        if (!(await protectedPageAccepted(page, target))) {
           console.log('[ROSTER] Session no longer accepted, logging in again.');
           await loginNow();
         }
