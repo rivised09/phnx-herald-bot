@@ -601,6 +601,8 @@ async function runSync({ reason = 'manual', batchSize, targetDate } = {}) {
         server: server.serverNumber,
         discoveredDates: 1,
         savedDates: [targetDate],
+        rosterRows: outcome.alliances.length + outcome.players.length,
+        rosterPlayers: outcome.players.length,
         missingBefore: existing.size,
         durationMs: Date.now() - started,
         upToDate: false,

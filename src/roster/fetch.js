@@ -49,9 +49,17 @@ function startTargetedFetch(date) {
       if (snapshot.error || snapshot.skipped) {
         throw new Error(snapshot.detail || snapshot.reason || 'The snapshot fetch could not start.');
       }
-      state = { ...state, phase: 'details' };
+      state = { ...state, phase: 'details', result: { snapshot } };
       const details = await runDetail({ reason: 'targeted', targetDate: date });
       if (details.error) throw new Error(details.error);
+      const playerCount = details.stats?.lords || 0;
+      if (!playerCount) {
+        throw new Error(
+          `Snapshot ${date} was saved, but no player detail pages produced data. ` +
+          'The source may have refused the detail requests, the detail pass may have hit its budget, ' +
+          'or player detail fetching may be disabled.',
+        );
+      }
       state = {
         ...state,
         running: false,
