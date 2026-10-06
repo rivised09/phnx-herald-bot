@@ -550,7 +550,7 @@ async function isDegraded(server, entry) {
   return shrankBoth;
 }
 
-async function runSync({ reason = 'manual', batchSize } = {}) {
+async function runSync({ reason = 'manual', batchSize, targetDate } = {}) {
   if (running) return { skipped: true, reason: 'already_running' };
   running = true;
 
@@ -558,6 +558,56 @@ async function runSync({ reason = 'manual', batchSize } = {}) {
   try {
     const server = await ensureServer();
     const existing = await loadExisting(server);
+    if (targetDate) {
+      const url = serverUrl({ date: targetDate });
+      const outcome = await withAuthedPage(async (page) => {
+        await open(page, url);
+        if (isLoginPage(page) || redirectedElsewhere(page, url)) {
+          throw credentialError('Redirected away from the roster before the requested date was read.');
+        }
+        const state = await page.evaluate(readDateState);
+        if (!state.active || state.active !== targetDate) {
+          throw new Error(`The source did not return the requested snapshot date ${targetDate}.`);
+        }
+        const extracted = await page.evaluate(extractEntities, { allianceId: null });
+        return crawlAllianceMembers(page, {
+          iso: targetDate,
+          url,
+          alliances: extracted.alliances,
+          players: extracted.players,
+          status: 'COMPLETE',
+          meta: extracted.meta,
+        }, targetDate);
+      });
+      if (!outcome.alliances.length && !outcome.players.length) {
+        throw new Error(`The requested snapshot ${targetDate} contained no roster rows.`);
+      }
+      if (await isDegraded(server, outcome)) {
+        throw new Error(`The requested snapshot ${targetDate} was rejected as a degraded read.`);
+      }
+      await saveSnapshot({
+        server,
+        isoDate: targetDate,
+        status: outcome.status,
+        url: outcome.url,
+        alliances: outcome.alliances,
+        players: outcome.players,
+      });
+      const summary = {
+        skipped: false,
+        reason,
+        scope: 'targeted',
+        targetDate,
+        server: server.serverNumber,
+        discoveredDates: 1,
+        savedDates: [targetDate],
+        missingBefore: existing.size,
+        durationMs: Date.now() - started,
+        upToDate: false,
+      };
+      console.log('[ROSTER] sync', JSON.stringify(summary));
+      return summary;
+    }
     const limit = Number.isFinite(batchSize) ? batchSize : BACKFILL_BATCH;
 
     const cachedDates = discoveryFresh() ? discovery.dates || [] : null;

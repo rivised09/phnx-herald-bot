@@ -330,7 +330,13 @@ function getDetailState() {
 }
 
 /** Newest snapshot first: the date the site actually displays gets done first. */
-async function pendingSnapshots(server) {
+async function pendingSnapshots(server, targetDate = null) {
+  if (targetDate) {
+    return prisma.rosterSnapshot.findMany({
+      where: { serverId: server.id, status: 'COMPLETE', snapshotDate: new Date(`${targetDate}T00:00:00.000Z`) },
+      select: { id: true, snapshotDate: true, scannedAt: true },
+    });
+  }
   return prisma.rosterSnapshot.findMany({
     where: { serverId: server.id, status: 'COMPLETE' },
     orderBy: { snapshotDate: 'desc' },
@@ -535,7 +541,7 @@ async function detailLords(snapshot, parser, deadline, counters) {
  */
 let detailRunning = false;
 
-async function runDetail({ reason = 'manual' } = {}) {
+async function runDetail({ reason = 'manual', targetDate } = {}) {
   if (disabled()) return { skipped: 'disabled', ...getDetailState() };
   if (detailRunning) return { skipped: 'already_running', ...getDetailState() };
   if (!allowedToRun(reason)) return { skipped: 'cooldown', ...getDetailState() };
@@ -572,8 +578,25 @@ async function runDetail({ reason = 'manual' } = {}) {
       return getDetailState();
     }
 
-    counters.refreshed = await maybeRefreshLatest(server);
-    const snapshots = await pendingSnapshots(server);
+    if (targetDate) {
+      const target = await prisma.rosterSnapshot.findFirst({
+        where: {
+          serverId: server.id,
+          status: 'COMPLETE',
+          snapshotDate: new Date(`${targetDate}T00:00:00.000Z`),
+        },
+        select: { id: true },
+      });
+      if (!target) throw new Error(`No stored roster snapshot exists for ${targetDate}.`);
+      await Promise.all([
+        prisma.rosterSnapshot.update({ where: { id: target.id }, data: { scannedAt: null } }),
+        prisma.lordSnapshot.updateMany({ where: { snapshotId: target.id }, data: { scannedAt: null } }),
+        prisma.allianceSnapshot.updateMany({ where: { snapshotId: target.id }, data: { scannedAt: null } }),
+      ]);
+    }
+
+    counters.refreshed = targetDate ? false : await maybeRefreshLatest(server);
+    const snapshots = await pendingSnapshots(server, targetDate);
     // Ordered newest first, so the head of the list is the date players are
     // detailed for when depth is limited to the newest one. Server and
     // alliance detail runs for every date regardless.
