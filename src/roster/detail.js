@@ -1,5 +1,5 @@
 const prisma = require('../db');
-const { BASE, withAuthedPage, rotateCredentials, accountCount } = require('./session');
+const { BASE, withAuthedPage, rotateCredentials, accountCount, refreshSessionIfNeeded } = require('./session');
 const { fetchHtml, cookieHeader, looksLikeLogin } = require('./http');
 const { withParser } = require('./parse');
 const extract = require('./extract');
@@ -170,15 +170,24 @@ function sleep(ms) {
  * A shared deadline rather than a per-request sleep, so workers cannot run
  * ahead of it: the rate stays fixed however much is in flight, which is what
  * keeps the source from treating the run as an abusive burst.
+ *
+ * The gap is a floor, not a metronome. An identical interval, run after run,
+ * is a machine signature of its own - so up to half the gap is added at
+ * random, which keeps the configured rate as the slowest possible pace while
+ * the cadence reads like someone pausing between pages.
  */
 let nextStart = 0;
+
+function nextGap(gap) {
+  return gap + Math.floor(Math.random() * gap * 0.5);
+}
 
 async function pace() {
   const gap = delayMs();
   if (gap <= 0) return;
   const now = Date.now();
   const start = Math.max(now, nextStart);
-  nextStart = start + gap;
+  nextStart = start + nextGap(gap);
   if (start > now) await sleep(start - now);
 }
 
@@ -206,7 +215,10 @@ async function reauthenticate() {
 }
 
 function isAuthFailure(res) {
-  return res.authExpired || (res.ok && looksLikeLogin(res.html));
+  // A challenge is its own kind of failure: not content (an interstitial
+  // parses as an empty page) and not proof the account is refused - it is
+  // usually the clearance cookie that lapsed, which a renewal repairs.
+  return Boolean(res.authExpired || res.challenge || (res.ok && looksLikeLogin(res.html)));
 }
 
 /**
@@ -218,17 +230,31 @@ function isAuthFailure(res) {
  * to the next configured account rather than repeating credentials that are
  * already being turned away. With nowhere left to move, the run stops instead
  * of hammering a source that is saying no.
+ *
+ * Both steps log what they saw, because they answer different questions:
+ * "renewal fixed it" means a cookie problem, "still refused after renewal"
+ * means the account is blocked and the rotation was right.
  */
-async function recover(url) {
+async function recover(url, res) {
   if (!attempts.reauthed) {
     attempts.reauthed = true;
+    console.warn(
+      `[ROSTER] Detail read refused: status=${res.status} challenge=${Boolean(res.challenge)} ` +
+        `authExpired=${Boolean(res.authExpired)} url=${res.url}; renewing the session.`,
+    );
     await reauthenticate();
     const retry = await fetchHtml(url, { cookie: await currentCookie() });
-    if (!isAuthFailure(retry)) return retry;
+    if (!isAuthFailure(retry)) {
+      console.log('[ROSTER] The renewed session works; the earlier failure was the session, not the account.');
+      return retry;
+    }
   }
 
   if (attempts.rotations < maxRotations()) {
     attempts.rotations += 1;
+    console.warn(
+      `[ROSTER] Still refused after a renewal; switching to the next account (rotation ${attempts.rotations} of ${maxRotations()}).`,
+    );
     rotateCredentials();
     await reauthenticate();
     const retry = await fetchHtml(url, { cookie: await currentCookie() });
@@ -236,13 +262,13 @@ async function recover(url) {
   }
 
   session.valid = false;
-  return { ok: false, status: 0, authExpired: true, html: '', url };
+  return { ok: false, status: 0, authExpired: true, challenge: false, html: '', url };
 }
 
 async function getPage(url) {
   await pace();
   const res = await fetchHtml(url, { cookie: await currentCookie() });
-  if (isAuthFailure(res)) return recover(url);
+  if (isAuthFailure(res)) return recover(url, res);
   return res;
 }
 
@@ -405,6 +431,23 @@ async function detailServer(snapshot, parser, deadline, counters) {
 }
 
 /**
+ * Whether a write failed because a concurrent re-ingest replaced its rows.
+ *
+ * `saveSnapshot` replaces a date's rows outright - new ids, with `scannedAt`,
+ * avatars and achievement lists carried over - and a second writer exists:
+ * the deployed bot re-ingests the newest date hourly while this pass may
+ * still hold ids read at its start. The carry-over means whatever this write
+ * was about to record is already on the new rows, so skipping the item loses
+ * nothing. Letting the error escape - which is what happened - costs the
+ * whole pass and every date queued behind it: P2003 is the achievements
+ * insert finding its parent gone, P2025 the scan-mark update on that same
+ * missing row.
+ */
+function replacedConcurrently(err) {
+  return Boolean(err) && (err.code === 'P2003' || err.code === 'P2025');
+}
+
+/**
  * Alliance pages are matched back to ours by membership, not by name.
  *
  * The search endpoint keys on alliance name, which is unique inside a server
@@ -429,6 +472,7 @@ async function detailAlliances(snapshot, parser, deadline, counters, ourLords, i
   const targets = pending.filter((row) => (ids.get(row.alliance.name) || []).length);
   counters.unresolved += pending.length - targets.length;
 
+  let replacedWarned = false;
   for (let i = 0; i < targets.length; i += chunkSize()) {
     if (!canContinue(deadline)) return;
     const chunk = targets.slice(i, i + chunkSize());
@@ -457,8 +501,19 @@ async function detailAlliances(snapshot, parser, deadline, counters, ourLords, i
       const rows = await parser.parse(item.page.html, extract.readStatSections);
       if (!rows || !rows.length) continue;
 
-      await saveSubjectMetrics(snapshot.id, SUBJECT.ALLIANCE, item.row.alliance.id, rows);
-      await prisma.allianceSnapshot.update({ where: { id: item.row.id }, data: { scannedAt: new Date() } });
+      try {
+        await saveSubjectMetrics(snapshot.id, SUBJECT.ALLIANCE, item.row.alliance.id, rows);
+        await prisma.allianceSnapshot.update({ where: { id: item.row.id }, data: { scannedAt: new Date() } });
+      } catch (err) {
+        if (!replacedConcurrently(err)) throw err;
+        if (!replacedWarned) {
+          replacedWarned = true;
+          console.log(
+            "[ROSTER] A concurrent sync replaced this date's rows mid-pass; the new rows already carry the old data, so this pass continues.",
+          );
+        }
+        continue;
+      }
       counters.alliances += 1;
     }
   }
@@ -478,6 +533,7 @@ async function detailLords(snapshot, parser, deadline, counters) {
   });
   if (!targets.length) return;
 
+  let replacedWarned = false;
   for (let i = 0; i < targets.length; i += chunkSize()) {
     if (!canContinue(deadline)) return;
     const chunk = targets.slice(i, i + chunkSize());
@@ -499,34 +555,45 @@ async function detailLords(snapshot, parser, deadline, counters) {
         extract.readPlaystyle,
       ]);
 
-      if (stats && stats.length) {
-        // Playstyle rides along with the rest so the delete-then-insert keeps
-        // the two in step: a page that stopped rendering the hexagon must stop
-        // leaving stale percentiles behind.
-        await saveSubjectMetrics(snapshot.id, SUBJECT.LORD, item.target.lordId, [
-          ...stats,
-          ...(playstyle || []),
-        ]);
-      }
-      if (achievements && achievements.length) {
-        await saveAchievements(
-          item.target.id,
-          achievements.map((row) => ({
-            name: row.name,
-            progress: row.progressText,
-            ...parseAchievementCompletion(row.completedText),
-          })),
-        );
-      }
-      if (history && history.length) {
-        await saveNameHistory(item.target.lordId, history);
-      }
+      try {
+        if (stats && stats.length) {
+          // Playstyle rides along with the rest so the delete-then-insert keeps
+          // the two in step: a page that stopped rendering the hexagon must stop
+          // leaving stale percentiles behind.
+          await saveSubjectMetrics(snapshot.id, SUBJECT.LORD, item.target.lordId, [
+            ...stats,
+            ...(playstyle || []),
+          ]);
+        }
+        if (achievements && achievements.length) {
+          await saveAchievements(
+            item.target.id,
+            achievements.map((row) => ({
+              name: row.name,
+              progress: row.progressText,
+              ...parseAchievementCompletion(row.completedText),
+            })),
+          );
+        }
+        if (history && history.length) {
+          await saveNameHistory(item.target.lordId, history);
+        }
 
-      const now = new Date();
-      await prisma.lordSnapshot.update({
-        where: { id: item.target.id },
-        data: { scannedAt: now, ...(avatar ? { avatarUrl: avatar } : {}) },
-      });
+        const now = new Date();
+        await prisma.lordSnapshot.update({
+          where: { id: item.target.id },
+          data: { scannedAt: now, ...(avatar ? { avatarUrl: avatar } : {}) },
+        });
+      } catch (err) {
+        if (!replacedConcurrently(err)) throw err;
+        if (!replacedWarned) {
+          replacedWarned = true;
+          console.log(
+            "[ROSTER] A concurrent sync replaced this date's rows mid-pass; the new rows already carry the old data, so this pass continues.",
+          );
+        }
+        continue;
+      }
       counters.lords += 1;
     }
   }
@@ -550,6 +617,10 @@ async function runDetail({ reason = 'manual', targetDate } = {}) {
   const startedAt = new Date().toISOString();
   session = { valid: true };
   attempts = { reauthed: false, rotations: 0 };
+  // Renew on the clock rather than after the first refusal: a lapsed
+  // Cloudflare clearance shows up mid-pass as a failed read, and recovering
+  // from that walks the account ladder over what is only an expired cookie.
+  await refreshSessionIfNeeded('detail pass');
   // Re-read rather than trust the previous run: a login in between may have
   // rotated the session, and the pace deadline must not carry over.
   cachedCookie = undefined;

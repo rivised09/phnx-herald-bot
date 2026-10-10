@@ -46,6 +46,12 @@ async function withParser(work) {
     const page = await browser.newPage();
     page.setDefaultTimeout(PARSE_TIMEOUT_MS);
 
+    // The parser needs markup, not the network: cleaned HTML has no scripts
+    // and its relative URLs cannot resolve from about:blank, but an absolute
+    // one - a font, an og:image - would still be fetched under Playwright's
+    // fingerprint. Nothing here needs it, so nothing here may leave.
+    await page.route('**/*', (route) => route.abort());
+
     const parser = {
       async parse(html, reader) {
         if (!html) return null;

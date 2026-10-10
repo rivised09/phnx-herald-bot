@@ -1,0 +1,3 @@
+# Python sidecar for the roster crawler (scrape/sidecar.py).
+# Install:  pip install -r scrape/requirements.txt && scrapling install
+scrapling[fetchers]>=0.4.15

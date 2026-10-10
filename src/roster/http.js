@@ -1,4 +1,5 @@
 const { loadSession, BASE } = require('./session');
+const sidecar = require('./sidecar');
 
 /**
  * Fetching source pages over plain HTTP instead of navigating a browser.
@@ -30,6 +31,26 @@ const FETCH_TIMEOUT_MS = 20000;
  */
 const MAX_REDIRECTS = 6;
 
+/**
+ * Whether the answer is Cloudflare's interstitial rather than the page.
+ *
+ * A challenge is not content and not (necessarily) a dead session: it means
+ * the clearance cookie was missing or expired for this request. Treating it
+ * as a normal read would parse an empty document and record "no stats";
+ * treating it as an account refusal would walk the rotation ladder over a
+ * cookie problem. The flag lets the caller renew the session instead.
+ */
+function looksLikeChallenge(status, html) {
+  if (status === 403 || status === 429 || status === 503) return true;
+  // Deliberately not "challenge-platform": Cloudflare's own detection snippet
+  // (/cdn-cgi/challenge-platform/scripts/jsd/main.js) is on every normal page,
+  // and matching it flagged all content as a challenge - which sent the
+  // recovery ladder into a rotation storm over perfectly good reads.
+  return /cf-chl-|_cf_chl_|challenge-form|Checking your browser before|Just a moment|Enable JavaScript and cookies/i.test(
+    html || '',
+  );
+}
+
 /** Cookie header for the saved session, or null when there is no session yet. */
 async function cookieHeader() {
   try {
@@ -44,6 +65,83 @@ async function cookieHeader() {
     return null;
   }
 }
+
+/**
+ * One URL for a routed browser navigation, exactly as the source answered.
+ *
+ * The roster crawl still drives a real page - the DOM readers run there - but
+ * the document that page renders is fetched here through the sidecar, so the
+ * navigation itself never carries Playwright's TLS fingerprint. Unlike
+ * `fetchHtml` none of the reading rules apply: the body and the final URL come
+ * back uninterpreted, because the route layer replays the source's own
+ * redirects instead of interpreting them as an expired session.
+ */
+async function fetchForRoute(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+  const result = await sidecar.request(
+    'fetch',
+    { url, cookie, timeoutMs, maxRedirects: MAX_REDIRECTS },
+    timeoutMs + 10000,
+  );
+  if (result.redirectLoop) {
+    return { redirectLoop: true, status: 0, url: result.url || url, html: '' };
+  }
+  const status = Number(result.status) || 0;
+  if (!status) throw new Error(`The sidecar returned no status for ${url}`);
+  return {
+    status,
+    url: result.url || url,
+    html: typeof result.html === 'string' ? result.html : '',
+    challenge: Boolean(result.challenge),
+  };
+}
+
+/**
+ * Reads one URL through the Python sidecar.
+ *
+ * Same contract as the direct path below - the rules about what counts as an
+ * expired session live in one place, in Node, so only the transport differs.
+ * The sidecar speaks to the source with a real Chrome TLS fingerprint (via
+ * Scrapling), which is the part undici cannot imitate and the part the source
+ * was using to refuse plain-HTTP reads.
+ */
+async function sidecarFetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+  const result = await sidecar.request(
+    'fetch',
+    { url, cookie, timeoutMs, maxRedirects: MAX_REDIRECTS },
+    timeoutMs + 10000,
+  );
+
+  const finalUrl = result.url || url;
+
+  // Still redirecting at the cap: a discarded cookie in a loop.
+  if (result.redirectLoop) {
+    return { ok: false, status: 0, authExpired: true, challenge: false, html: '', url: finalUrl };
+  }
+
+  let pathname = '';
+  try {
+    pathname = new URL(finalUrl).pathname;
+  } catch {
+    pathname = '';
+  }
+
+  const authExpired = pathname === '/login' || pathname === '/';
+  const status = Number(result.status) || 0;
+  const redirected = status >= 200 && status < 300;
+  const html = redirected && !authExpired ? result.html || '' : '';
+
+  return {
+    ok: redirected && !authExpired && html.length > 0,
+    status,
+    authExpired,
+    challenge: Boolean(result.challenge),
+    html,
+    url: finalUrl,
+  };
+}
+
+/** Warned once per process: a dead sidecar would otherwise log on every read. */
+let sidecarWarned = false;
 
 /**
  * Reads one URL.
@@ -62,6 +160,20 @@ async function cookieHeader() {
  * network error instead of an expired session.
  */
 async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+  if (sidecar.enabled()) {
+    try {
+      return await sidecarFetchHtml(url, { cookie, timeoutMs });
+    } catch (err) {
+      // Availability over purity: a dead Python process must not stop a run.
+      // The warning is the tell that the source is being contacted with the
+      // wrong fingerprint again.
+      if (!sidecarWarned) {
+        sidecarWarned = true;
+        console.warn('[ROSTER] Sidecar fetch failed, falling back to direct HTTP:', err.message);
+      }
+    }
+  }
+
   const headers = {
     'User-Agent': USER_AGENT,
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -85,7 +197,7 @@ async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = 
 
   // Still redirecting at the cap means the source is bouncing us in a loop,
   // which is what a discarded cookie looks like.
-  if (!res) return { ok: false, status: 0, authExpired: true, html: '', url: current };
+  if (!res) return { ok: false, status: 0, authExpired: true, challenge: false, html: '', url: current };
 
   let pathname = '';
   try {
@@ -95,12 +207,17 @@ async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = 
   }
 
   const authExpired = pathname === '/login' || pathname === '/';
-  const html = res.ok && !authExpired ? await res.text() : '';
+  // The body is read even when the status is wrong, so an interstitial can be
+  // told apart from a missing page; only the returned `html` keeps the rule
+  // that an unusable answer carries no content.
+  const body = await res.text().catch(() => '');
+  const html = res.ok && !authExpired ? body : '';
 
   return {
     ok: res.ok && !authExpired && html.length > 0,
     status: res.status,
     authExpired,
+    challenge: looksLikeChallenge(res.status, body),
     html,
     url: current,
   };
@@ -113,4 +230,12 @@ function looksLikeLogin(html) {
   return /name="password"|action="\/login"/i.test(html);
 }
 
-module.exports = { fetchHtml, cookieHeader, looksLikeLogin, USER_AGENT, BASE };
+module.exports = {
+  fetchHtml,
+  fetchForRoute,
+  cookieHeader,
+  looksLikeLogin,
+  looksLikeChallenge,
+  USER_AGENT,
+  BASE,
+};
