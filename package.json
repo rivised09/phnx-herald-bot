@@ -7,16 +7,16 @@
     "node": "22.x"
   },
   "scripts": {
-    "start": "npx prisma migrate deploy && node src/index.js",
+    "start": "npx prisma migrate deploy && npx prisma migrate deploy --schema prisma-roster/schema.prisma && node src/index.js",
     "dev": "node src/index.js",
     "deploy:commands": "node src/bot/deploy-commands.js",
-    "migrate": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy",
+    "migrate": "prisma migrate dev && prisma migrate dev --schema prisma-roster/schema.prisma",
+    "migrate:deploy": "prisma migrate deploy && prisma migrate deploy --schema prisma-roster/schema.prisma",
     "install:browsers": "playwright install --with-deps chromium",
     "test": "node test/roster.test.js",
     "history": "node scripts/history.js",
     "sync": "node scripts/history.js --latest",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate && prisma generate --schema prisma-roster/schema.prisma"
   },
   "keywords": [],
   "author": "",

@@ -8,7 +8,7 @@ const assert = require('assert');
 
 process.env.CALLOFSTATS_SERVER_ID = '999999';
 
-const prisma = require('../src/db');
+const prisma = require('../src/roster/db');
 const ingest = require('../src/roster/ingest');
 const { saveSnapshot, planWork } = ingest;
 const { getStoredRoster, getStoredCounts, formatStat, loadPlayerMetrics, getPlayerDetail } = require('../src/roster/store');

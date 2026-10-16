@@ -1,4 +1,4 @@
-const prisma = require('../db');
+const prisma = require('./db');
 const { BASE, withAuthedPage, rotateCredentials, accountCount, refreshSessionIfNeeded } = require('./session');
 const { fetchHtml, cookieHeader, looksLikeLogin } = require('./http');
 const { withParser } = require('./parse');

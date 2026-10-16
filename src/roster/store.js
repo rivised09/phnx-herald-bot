@@ -1,4 +1,4 @@
-const prisma = require('../db');
+const prisma = require('./db');
 const { serverId, sourceUrl } = require('./v1');
 const { buildInsights } = require('./insights');
 

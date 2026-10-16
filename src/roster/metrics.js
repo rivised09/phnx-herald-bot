@@ -1,4 +1,4 @@
-const prisma = require('../db');
+const prisma = require('./db');
 
 /**
  * Storage for the ~350 label/value fields the source exposes per snapshot.

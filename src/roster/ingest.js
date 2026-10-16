@@ -1,4 +1,4 @@
-const prisma = require('../db');
+const prisma = require('./db');
 const { withAuthedPage, BASE } = require('./session');
 const { historyEnabled, scopeLabel } = require('./scope');
 const {

@@ -1,4 +1,4 @@
-const prisma = require('../db');
+const prisma = require('./db');
 const { withAuthedPage, BASE } = require('./session');
 const { open, isLoginPage } = require('./v1');
 

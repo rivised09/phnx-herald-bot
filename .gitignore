@@ -7,3 +7,5 @@ dist/
 .DS_Store
 # Playwright session file holds live auth tokens - never commit.
 data/
+# Generated roster Prisma client (prisma-roster/schema.prisma).
+src/generated/

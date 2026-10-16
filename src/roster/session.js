@@ -112,7 +112,7 @@ async function loadAccountIndex() {
   if (accountIndexLoaded) return;
   accountIndexLoaded = true;
   try {
-    const prisma = require('../db');
+    const prisma = require('./db');
     const row = await prisma.setting.findUnique({ where: { key: ACCOUNT_INDEX_KEY } });
     const parsed = parseInt(row?.value, 10);
     const count = accountCount();
@@ -124,7 +124,7 @@ async function loadAccountIndex() {
 
 async function saveAccountIndex() {
   try {
-    const prisma = require('../db');
+    const prisma = require('./db');
     await prisma.setting.upsert({
       where: { key: ACCOUNT_INDEX_KEY },
       create: { key: ACCOUNT_INDEX_KEY, value: String(accountIndex) },
@@ -181,7 +181,7 @@ function readLocalSession() {
 
 async function loadSession() {
   try {
-    const prisma = require('../db');
+    const prisma = require('./db');
     const row = await prisma.setting.findUnique({ where: { key: SESSION_KEY } });
     if (row?.value) {
       const parsed = JSON.parse(row.value);
@@ -211,7 +211,7 @@ async function persistSessionState(state) {
   }
 
   try {
-    const prisma = require('../db');
+    const prisma = require('./db');
     const value = JSON.stringify(state);
     await prisma.setting.upsert({
       where: { key: SESSION_KEY },
