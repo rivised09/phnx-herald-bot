@@ -173,6 +173,9 @@ model AllianceSnapshot {
   id          String @id @default(uuid())
   snapshotId  String @map("snapshot_id")
   allianceId  String @map("alliance_id")
+  /// The alliance's name as the source printed it on this date. Null on rows
+  /// ingested before the column existed; readers fall back to the live name.
+  name        String? @db.VarChar(160)
   /// BigInt: source values reach into the tens of billions.
   power       BigInt
   memberCount Int    @default(0) @map("member_count")
@@ -192,6 +195,10 @@ model LordSnapshot {
   snapshotId String  @map("snapshot_id")
   lordId     String  @map("lord_id")
   allianceId String? @map("alliance_id")
+  /// The player's name as the source printed it on this date - a rename
+  /// later must not rewrite what an older snapshot says. Null on rows
+  /// ingested before the column existed; readers fall back to the live name.
+  name       String? @db.VarChar(160)
   power      BigInt
   rank       Int?
   /// Player avatar for that date. Null until an ingest reads it, or until the

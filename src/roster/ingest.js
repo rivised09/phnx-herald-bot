@@ -416,6 +416,9 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
         data: alliances.map((entity, i) => ({
           snapshotId: snapshot.id,
           allianceId: allianceIds.get(entity.name),
+          // The name as printed on this date: a later rename must not
+          // rewrite what an older snapshot says.
+          name: entity.name,
           power: toBigIntStat(entity.stats?.Power),
           memberCount: toIntStat(entity.stats?.Members),
           rank: entity.rank ?? i + 1,
@@ -433,6 +436,9 @@ async function saveSnapshot({ server, isoDate, status, url, alliances, players }
             snapshotId: snapshot.id,
             lordId,
             allianceId: entity.allianceId ? allianceIds.get(entity.allianceId) ?? null : null,
+            // The name as printed on this date, next to the rename signal
+            // above: the live name moves, this one stays with its snapshot.
+            name: entity.name,
             power: toBigIntStat(entity.stats?.Power),
             rank: entity.rank ?? i + 1,
             avatarUrl: entity.avatar || previous?.avatarUrl || historicalAvatars.get(lordId) || null,
