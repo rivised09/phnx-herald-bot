@@ -2,13 +2,14 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "npm install --omit=dev && npx playwright install --with-deps chromium"
+    "buildCommand": "npm install --omit=dev && npx playwright install --with-deps chromium && apt-get update && apt-get install -y xvfb xauth"
   },
   "deploy": {
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
     "healthcheckPath": "/health",
-    "healthcheckTimeout": 300
+    "healthcheckTimeout": 300,
+    "startCommand": "npx prisma migrate deploy && npx prisma migrate deploy --schema prisma-roster/schema.prisma && if command -v xvfb-run >/dev/null 2>&1 && command -v xauth >/dev/null 2>&1; then xvfb-run -a -s '-screen 0 1600x1000x24' node src/index.js; else node src/index.js; fi"
   }
 }
