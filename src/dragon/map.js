@@ -51,6 +51,7 @@ const TEXT = 'text';
 const SERVER = 'server';
 const NUMBER = 'number';
 const SECONDS = 'seconds';
+const TIMESTAMP = 'timestamp';
 
 /**
  * DragonStats field -> our label, section and formatting.
@@ -166,7 +167,7 @@ const EXTRA_MAP = [
   { from: 'allianceBuildMinutes', label: 'Alliance Build Minutes' },
   { from: 'allianceBlessingsChestLevel', label: 'Alliance Blessing Chest Level' },
   { from: 'loginStreakDays', label: 'Login Streak Days' },
-  { from: 'lastLoginTime', label: 'Last Login Time' },
+  { from: 'lastLoginTime', label: 'Last Login Time', kind: TIMESTAMP },
   { from: 'castleX', label: 'Castle X' },
   { from: 'castleY', label: 'Castle Y' },
   { from: 'castleServerId', label: 'Castle Server' },
@@ -274,6 +275,7 @@ function metricValue(field, player) {
     return text || null;
   }
   if (field.kind === SERVER) return serverLabel(raw);
+  if (field.kind === TIMESTAMP) return num(raw);
   return num(raw);
 }
 
@@ -285,6 +287,11 @@ function displayValue(field, player) {
     return text || null;
   }
   if (field.kind === SERVER) return serverLabel(raw);
+  if (field.kind === TIMESTAMP) {
+    const ms = num(raw);
+    if (ms === null) return null;
+    return new Date(ms).toLocaleString();
+  }
   if (field.kind === SECONDS) {
     const seconds = num(raw);
     return seconds === null ? null : `${seconds.toLocaleString('en-US')} Sec`;
