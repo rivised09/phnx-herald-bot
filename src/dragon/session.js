@@ -66,6 +66,62 @@ async function saveSession(context) {
 }
 
 /**
+ * Imports a storage state captured on another machine.
+ *
+ * A Google login needs a visible window, so a container host can never create
+ * one itself. `npm run dragon:login` on a desktop writes
+ * `data/dragonstats-session.json`; uploading that file here lets the bot reuse
+ * the same cookies and Convex JWT.
+ *
+ * Only the expiry is returned. The state itself holds live tokens and must
+ * never be logged.
+ */
+function importSession(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('The file is not a Playwright storage state.');
+  }
+  if (!Array.isArray(state.cookies)) {
+    throw new Error('The session file has no cookies.');
+  }
+  if (!Array.isArray(state.origins)) {
+    throw new Error('The session file has no localStorage origins.');
+  }
+
+  const origin = state.origins.find((entry) => String(entry?.origin || '').startsWith(BASE));
+  const token = (origin?.localStorage || []).find((item) =>
+    String(item?.name || '').startsWith('__convexAuthJWT'),
+  );
+  if (!token?.value) {
+    throw new Error('The session file has no DragonStats Convex token. Run npm run dragon:login first.');
+  }
+
+  let expiresAt = null;
+  let secondsLeft = null;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(String(token.value).split('.')[1], 'base64url').toString('utf8'),
+    );
+    secondsLeft = Number(payload.exp) - Math.floor(Date.now() / 1000);
+    expiresAt = payload.exp ? new Date(payload.exp * 1000).toISOString() : null;
+  } catch {
+    throw new Error('The DragonStats token in that file is not readable.');
+  }
+
+  if (!Number.isFinite(secondsLeft) || secondsLeft <= 120) {
+    throw new Error(
+      `That DragonStats session is expired${
+        expiresAt ? ` (${expiresAt})` : ''
+      }. Run npm run dragon:login again on a desktop.`,
+    );
+  }
+
+  const saved = { ...state, savedAt: Date.now() };
+  fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(saved));
+  return { expiresAt, secondsLeft };
+}
+
+/**
  * Whether the browser is signed in.
  *
  * DragonStats uses Convex for auth, which keeps its JWT in localStorage under
@@ -151,6 +207,7 @@ module.exports = {
   requirePlaywright,
   loadSession: readLocalSession,
   saveSession,
+  importSession,
   signedIn,
   authToken,
   withPage,
