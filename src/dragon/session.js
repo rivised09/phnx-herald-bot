@@ -87,7 +87,11 @@ function importSession(state) {
     throw new Error('The session file has no localStorage origins.');
   }
 
-  const origin = state.origins.find((entry) => String(entry?.origin || '').startsWith(BASE));
+  const origin = state.origins.find((entry) =>
+    (entry?.localStorage || []).some((item) =>
+      String(item?.name || '').startsWith('__convexAuthJWT'),
+    ),
+  );
   const token = (origin?.localStorage || []).find((item) =>
     String(item?.name || '').startsWith('__convexAuthJWT'),
   );
