@@ -18,6 +18,7 @@ const { accountCount, rotateCredentials } = require('../src/roster/session');
 const { historyEnabled, scopeLabel } = require('../src/roster/scope');
 const detail = require('../src/roster/detail');
 const insights = require('../src/roster/insights');
+const { normalizeJob } = require('../src/scrape/runner');
 
 const SERVER = 999999;
 const DATE = '1999-01-01';
@@ -37,6 +38,121 @@ function check(label, fn) {
     console.log(`      ${err.message}`);
   }
 }
+
+// ------------------------------------------------------- merge & contract ---
+
+const { mergeFile } = require('../src/roster/merge');
+const contract = require('../src/roster/contract');
+
+/**
+ * A player file shaped like a real export, small enough to reason about.
+ * The two sources are simulated by merging partial payloads into it - which is
+ * exactly what a primary scrape followed by a callofstats enrichment does.
+ */
+function playerFixture() {
+  return {
+    id: '25615899',
+    name: 'riv',
+    dates: ['2026-10-15', '2026-10-14'],
+    byDate: {
+      '2026-10-15': {
+        name: 'riv',
+        rank: 59,
+        power: 19144891,
+        alliance: '[PHW-] PHOENIX OF WAR',
+        sections: [{ section: 'War Stats', rows: [{ label: 'Merits', value: '1,000' }] }],
+      },
+      '2026-10-14': { name: 'riv', rank: 60, power: 19000000 },
+    },
+    metrics: { '2026-10-15': { Merits: 1000, Division: 'S3-2638 | Season 3' } },
+    radar: { '2026-10-15': { Merits: 40 } },
+    nameHistory: ['old-riv'],
+    otherServers: [],
+  };
+}
+
+check('merge keeps what the incoming source does not send', () => {
+  const incoming = { id: '25615899', byDate: { '2026-10-15': { avatar: 'https://img/p.jpg' } } };
+  const merged = mergeFile('player', playerFixture(), incoming);
+  assert.strictEqual(merged.name, 'riv');
+  assert.deepStrictEqual(merged.nameHistory, ['old-riv']);
+  assert.strictEqual(merged.byDate['2026-10-15'].sections.length, 1, 'sections must survive');
+  assert.strictEqual(merged.byDate['2026-10-15'].avatar, 'https://img/p.jpg', 'new field must be added');
+});
+
+check('merge adds new top-level fields without touching the old ones', () => {
+  const existing = playerFixture();
+  const incoming = {
+    id: '25615899',
+    previousServers: ['#954', '#971'],
+    albums: [{ url: 'https://img/a.jpg', likes: 12 }],
+  };
+  const merged = mergeFile('player', existing, incoming);
+  assert.deepStrictEqual(merged.previousServers, ['#954', '#971']);
+  assert.strictEqual(merged.albums.length, 1);
+  assert.strictEqual(merged.dates.length, 2);
+});
+
+check('merge unions dates newest first', () => {
+  const merged = mergeFile('player', playerFixture(), { dates: ['2026-10-16', '2026-10-15'] });
+  assert.deepStrictEqual(merged.dates, ['2026-10-16', '2026-10-15', '2026-10-14']);
+});
+
+check('merge never blanks a value with null', () => {
+  const merged = mergeFile('player', playerFixture(), {
+    name: null,
+    byDate: { '2026-10-15': { power: null, rank: 44 } },
+  });
+  assert.strictEqual(merged.name, 'riv');
+  assert.strictEqual(merged.byDate['2026-10-15'].power, 19144891);
+  assert.strictEqual(merged.byDate['2026-10-15'].rank, 44);
+});
+
+check('album images merge by url, so likes update instead of duplicating', () => {
+  const first = mergeFile('player', { id: '1' }, { albums: [{ url: 'a.jpg', likes: 3 }] });
+  const second = mergeFile('player', first, { albums: [{ url: 'a.jpg', likes: 9 }, { url: 'b.jpg', likes: 1 }] });
+  assert.strictEqual(second.albums.length, 2);
+  assert.strictEqual(second.albums.find((item) => item.url === 'a.jpg').likes, 9);
+});
+
+check('a snapshot unions its players and re-sorts them by rank', () => {
+  const existing = { status: 'ok', players: [{ id: 'b', index: 2 }, { id: 'a', index: 1 }] };
+  const incoming = { status: 'ok', players: [{ id: 'a', index: 1, avatar: 'x' }, { id: 'c', index: 3 }] };
+  const merged = mergeFile('snapshot', existing, incoming);
+  assert.deepStrictEqual(merged.players.map((item) => item.id), ['a', 'b', 'c']);
+  assert.strictEqual(merged.players[0].avatar, 'x');
+});
+
+check('a complete player file conforms to the contract', () => {
+  const result = contract.check('player', playerFixture());
+  assert.deepStrictEqual(result.missing, []);
+  assert.deepStrictEqual(result.type, []);
+  assert.strictEqual(result.ok, true);
+});
+
+check('a missing required field is reported as a gap', () => {
+  const broken = playerFixture();
+  delete broken.dates;
+  const result = contract.check('player', broken);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.missing.includes('dates'), `missing: ${result.missing.join(',')}`);
+});
+
+check('an unknown field is reported as new data, not as an error', () => {
+  const candidate = { ...playerFixture(), badges: [{ name: 'Veteran' }] };
+  const result = contract.check('player', candidate);
+  assert.strictEqual(result.ok, true, 'new fields must never fail conformance');
+  assert.ok(result.extra.includes('badges'), `extra: ${result.extra.join(',')}`);
+});
+
+check('the contract already has a home for previous servers and albums', () => {
+  const candidate = playerFixture();
+  candidate.previousServers = ['#954'];
+  candidate.albums = [{ url: 'a.jpg', likes: 2 }];
+  const result = contract.check('player', candidate);
+  assert.strictEqual(result.ok, true);
+  assert.deepStrictEqual(result.extra, [], `should be known fields, got ${result.extra.join(',')}`);
+});
 
 // ---------------------------------------------------------------- values ---
 
@@ -910,6 +1026,42 @@ async function main() {
       await new Promise((resolve) => loop.close(resolve));
       await new Promise((resolve) => once.close(resolve));
     }
+
+    check('scrape jobs map latest, date and older scans onto CLI arguments', () => {
+      assert.deepStrictEqual(normalizeJob({ kind: 'dragon', server: '973' }).args, [
+        '--server',
+        '973',
+      ]);
+      assert.deepStrictEqual(
+        normalizeJob({ kind: 'dragon', server: '973', mode: 'date', date: '2026-10-24' }).args,
+        ['--server', '973', '--scan-date', '2026-10-24'],
+      );
+      assert.deepStrictEqual(
+        normalizeJob({ kind: 'dragon', server: '973', mode: 'scan-index', scanIndex: 3 }).args,
+        ['--server', '973', '--scan-index', '3'],
+      );
+    });
+
+    check('enrichment and full scrapes carry their concurrency', () => {
+      assert.deepStrictEqual(
+        normalizeJob({ kind: 'enrich', server: '973', concurrency: 2, date: '2026-10-26' }).args,
+        ['--server', '973', '--concurrency', '2', '--date', '2026-10-26'],
+      );
+      assert.deepStrictEqual(
+        normalizeJob({ kind: 'callofstats', server: '973', concurrency: 9 }).args,
+        ['--server', '973', '--concurrency', '5'],
+      );
+      assert.deepStrictEqual(normalizeJob({ kind: 'login' }).args, ['--timeout=10']);
+    });
+
+    check('invalid scrape requests are rejected before anything spawns', () => {
+      assert.throws(() => normalizeJob({ kind: 'dragon', mode: 'date' }), /Pick a date/);
+      assert.throws(
+        () => normalizeJob({ kind: 'dragon', mode: 'scan-index', scanIndex: -1 }),
+        /Scan index/,
+      );
+      assert.throws(() => normalizeJob({ kind: 'dragon', server: 'abc' }), /Server must be a number/);
+    });
   } catch (err) {
     failed += 1;
     console.log(`FAIL  unexpected error\n      ${err.stack}`);

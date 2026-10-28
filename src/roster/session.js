@@ -720,9 +720,12 @@ module.exports = {
   sessionPath,
   loadSession,
   saveSession,
+  persistSessionState,
   requirePlaywright,
   rotateCredentials,
   accountCount,
+  accountList,
+  credentials,
   refreshSessionIfNeeded,
   BASE,
 };
