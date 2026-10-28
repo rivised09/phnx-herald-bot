@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { sandboxEnabled } = require('../browser');
 
 /**
  * A saved DragonStats session.
@@ -116,11 +117,13 @@ async function withPage(work, { headless = true } = {}) {
 
   const browser = await pw.chromium.launch({
     headless,
-    // Google and this app both look at the automation surface. The sandbox on,
-    // no `--enable-automation` and the blink flag masked make the browser what
-    // it claims to be; the user agent is left alone so it matches the engine
-    // instead of contradicting `navigator.userAgentData`.
-    chromiumSandbox: true,
+    // Google and this app both look at the automation surface. No
+    // `--enable-automation` and the blink flag masked make the browser what
+    // it claims to be; the sandbox stays on unless this is a root container,
+    // where Chromium refuses to start with it. The user agent is left alone
+    // so it matches the engine instead of contradicting
+    // `navigator.userAgentData`.
+    chromiumSandbox: sandboxEnabled(),
     ignoreDefaultArgs: ['--enable-automation'],
     args: ['--disable-blink-features=AutomationControlled'],
   });

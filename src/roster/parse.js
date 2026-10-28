@@ -1,4 +1,5 @@
 const { requirePlaywright } = require('./session');
+const { sandboxEnabled } = require('../browser');
 
 /**
  * Turning fetched HTML into data.
@@ -40,7 +41,10 @@ function clean(html) {
  */
 async function withParser(work) {
   const pw = requirePlaywright();
-  const browser = await pw.chromium.launch({ headless: true });
+  const browser = await pw.chromium.launch({
+    headless: true,
+    chromiumSandbox: sandboxEnabled(),
+  });
 
   try {
     const page = await browser.newPage();

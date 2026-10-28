@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { sandboxEnabled } = require('../browser');
 
 /**
  * Persistent CallOfStats login.
@@ -626,7 +627,10 @@ async function withAuthedPage(work) {
 
   const run = async () => {
     await loadAccountIndex();
-    const browser = await pw.chromium.launch({ headless: true });
+    const browser = await pw.chromium.launch({
+      headless: true,
+      chromiumSandbox: sandboxEnabled(),
+    });
     try {
       const context = await browser.newContext({
         storageState,

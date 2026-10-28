@@ -178,9 +178,25 @@ function getScrapeState({ after = 0, limit = 500 } = {}) {
   return { job: publicJob(), logs: fresh.slice(-max) };
 }
 
+/**
+ * Whether the host has a display a browser window can open on.
+ *
+ * Windows and macOS are desktops. On Linux, DISPLAY or WAYLAND_DISPLAY is
+ * trusted (a container may run Xvfb deliberately), with the X socket checked
+ * so a stale variable does not start a browser that cannot connect. Set
+ * DRAGONSTATS_INTERACTIVE_LOGIN=0 on a server whose virtual display nobody is
+ * watching, so the job fails with an explanation instead of waiting.
+ */
 function canOpenWindow() {
   if (process.platform === 'win32' || process.platform === 'darwin') return true;
-  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+  if (process.env.DRAGONSTATS_INTERACTIVE_LOGIN === '0') return false;
+  if (process.env.WAYLAND_DISPLAY) return true;
+
+  const display = process.env.DISPLAY;
+  if (!display) return false;
+  const match = /^:(\d+)/.exec(display);
+  if (!match) return true;
+  return fs.existsSync(`/tmp/.X11-unix/X${match[1]}`);
 }
 
 /** Whether the saved DragonStats storage state carries a usable Convex JWT. */
@@ -421,10 +437,14 @@ async function signIn() {
   if (!canOpenWindow()) {
     throw new Error(
       'DragonStats sign-in needs a browser window on the bot host, but no display is available. ' +
-        'Run npm run dragon:login on a machine with a desktop, then start the scrape again.',
+        'Run the scrape from a machine with a desktop, or give this host a display (Xvfb/VNC).',
     );
   }
-  addLog('meta', '[scrape] Opening the DragonStats Google sign-in window on the bot host.');
+  addLog(
+    'meta',
+    '[scrape] Opening the DragonStats Google sign-in window on the bot host. ' +
+      'If you cannot see it, cancel and run the scrape from a desktop.',
+  );
   return runStep('login', [`--timeout=${LOGIN_TIMEOUT_MINUTES}`], 'login');
 }
 

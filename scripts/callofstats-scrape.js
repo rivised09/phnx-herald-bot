@@ -26,6 +26,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const { chromium } = require('playwright');
+const { sandboxEnabled } = require('../src/browser');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 
@@ -160,7 +161,10 @@ class AuthedContext {
   }
 
   async start() {
-    this.browser = await this.pw.chromium.launch({ headless: true });
+    this.browser = await this.pw.chromium.launch({
+      headless: true,
+      chromiumSandbox: sandboxEnabled(),
+    });
     this.context = await this.browser.newContext();
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(30000);

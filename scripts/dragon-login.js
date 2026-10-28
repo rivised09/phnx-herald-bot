@@ -16,6 +16,7 @@
 const path = require('path');
 
 const session = require('../src/dragon/session');
+const { sandboxEnabled } = require('../src/browser');
 
 const TIMEOUT_MINUTES = Number(
   (process.argv.find((arg) => arg.startsWith('--timeout=')) || '').split('=')[1] || 15,
@@ -55,15 +56,18 @@ function describe(state) {
  *
  * Playwright quietly disables the Chromium sandbox and marks the session as
  * automated; Google reads both and refuses the sign-in with "This browser or
- * app may not be secure". A real Brave with the sandbox on, no
- * `--enable-automation` and `navigator.webdriver` masked looks like the browser
- * the user opened by hand, which is what it is.
+ * app may not be secure". A real Brave with the sandbox on (except in a root
+ * container, where Chromium refuses to start), no `--enable-automation` and
+ * `navigator.webdriver` masked looks like the browser the user opened by hand,
+ * which is what it is.
  */
 function launchOptions(extra = {}) {
   return {
     headless: false,
     viewport: { width: 1500, height: 950 },
-    chromiumSandbox: true,
+    // Chromium cannot start as root with the sandbox on, which is how the
+    // container hosts run it. On a desktop the sandbox stays enabled.
+    chromiumSandbox: sandboxEnabled(),
     ignoreDefaultArgs: ['--enable-automation'],
     args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--no-default-browser-check'],
     ...extra,

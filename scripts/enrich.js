@@ -27,6 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const { sandboxEnabled } = require('../src/browser');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const r2 = require('../src/roster/r2');
@@ -329,7 +330,7 @@ async function processPlayers(pw, accounts, store, playerIds, targetDate, dryRun
   const results = { processed: 0, skipped: 0, errors: [], bytes: 0 };
   let accountIdx = 0;
 
-  const browser = await pw.chromium.launch({ headless: true });
+  const browser = await pw.chromium.launch({ headless: true, chromiumSandbox: sandboxEnabled() });
   const context = await browser.newContext();
   const page = await context.newPage();
   page.setDefaultTimeout(30000);
