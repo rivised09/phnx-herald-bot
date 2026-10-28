@@ -435,6 +435,7 @@ function fromScan(scan, { server, date, existingAlliances = {}, crawledAt = null
           avatar: null,
           alliance: String(record.alliance || '').trim() || null,
           sections: sectionsFor(record),
+          albums: [],
         },
       },
       metrics: { [date]: metricsFor(record) },

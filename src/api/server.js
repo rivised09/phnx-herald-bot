@@ -14,6 +14,13 @@ function createApp(context) {
   app.use(cors({ origin: CONFIG.APP.CLIENT_URL }));
   app.use(express.json({ limit: '2mb' }));
 
+  // Root health endpoint for uptime monitors (e.g. BetterStack).
+  // Render free tier spins down after inactivity; a periodic GET here
+  // keeps the web service awake so the Discord gateway stays connected.
+  app.get('/', (req, res) => {
+    res.status(200).send('Phoenix Herald bot is running');
+  });
+
   app.use('/health', healthRouter);
   app.use('/api/events', eventsRouter(context));
   app.use('/api/channels', channelsRouter());
