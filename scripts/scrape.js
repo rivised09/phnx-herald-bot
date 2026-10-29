@@ -25,6 +25,7 @@ const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
+const { carryForward } = require('../src/roster/carry');
 
 const PLAYERS = 'players';
 const ALLIANCES = 'alliances';
@@ -226,7 +227,8 @@ async function scrapeServer(server, args, scanIndex, store) {
 
   const players = await pool([...built.players.values()], args.concurrency, async (player) => {
     const key = `${PLAYERS}/${player.id}.json`;
-    return { key, value: mergeFile('player', await store.get(key), player) };
+    const existing = await store.get(key);
+    return { key, value: mergeFile('player', existing, carryForward(existing, player, date)) };
   });
 
   const alliances = await pool([...built.alliances], args.concurrency, async (alliance) => {

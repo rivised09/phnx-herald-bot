@@ -42,6 +42,8 @@ function check(label, fn) {
 // ------------------------------------------------------- merge & contract ---
 
 const { mergeFile } = require('../src/roster/merge');
+const { carryForward } = require('../src/roster/carry');
+const { sectionFor } = require('../src/roster/sections');
 const contract = require('../src/roster/contract');
 
 /**
@@ -121,6 +123,133 @@ check('a snapshot unions its players and re-sorts them by rank', () => {
   const merged = mergeFile('snapshot', existing, incoming);
   assert.deepStrictEqual(merged.players.map((item) => item.id), ['a', 'b', 'c']);
   assert.strictEqual(merged.players[0].avatar, 'x');
+});
+
+check('players with no alliance land in the shared bucket', () => {
+  const map = require('../src/dragon/map');
+  const built = map.fromScan(
+    [
+      { id: '1', name: 'Solo', rank: 1, power: '1000', alliance: '' },
+      { id: '2', name: 'Joined', rank: 2, power: '500', alliance: '[AAA] Alpha' },
+    ],
+    { server: 973, date: '2026-10-28' },
+  );
+
+  const bucket = built.alliances.find((item) => item.name === 'Not In An Alliance');
+  assert.ok(bucket, 'the unaffiliated bucket is missing');
+  assert.strictEqual(bucket.id, '030d6dc7-910b-4186-bafb-13df68dc3a96');
+  assert.strictEqual(built.snapshot.players.find((item) => item.id === '1').allianceId, 'Not In An Alliance');
+  assert.strictEqual(built.players.get('1').byDate['2026-10-28'].alliance, 'Not In An Alliance');
+});
+
+check('DragonStats faction codes become the names callofstats published', () => {
+  const map = require('../src/dragon/map');
+  const sections = map.sectionsFor({ faction: '1' });
+  const profile = sections.find((item) => item.section === '');
+  assert.strictEqual(profile.rows.find((row) => row.label === 'Faction').value, 'League of Order');
+  assert.strictEqual(map.metricsFor({ faction: '3' }).Faction, 'Springwardens');
+});
+
+check('DragonStats fields join the callofstats labels and units', () => {
+  const map = require('../src/dragon/map');
+  const record = {
+    id: '1',
+    name: 'X',
+    rank: '1',
+    power: '1000',
+    kvk_merits: '500',
+    pvpPoint: '400',
+    totalMerits: '9000',
+    maxPvpPoint: '8000',
+    kvkJoinCnt: '6',
+    kvkWinCnt: '2',
+    VictoryTimes: '100',
+    FailureTimes: '10',
+    UnitKill: '5000',
+    NumberOfHeal: '10000',
+  };
+  const sections = map.sectionsFor(record);
+  const value = (section, label) => sections
+    .find((item) => item.section === section)
+    ?.rows.find((row) => row.label === label)?.value;
+
+  assert.strictEqual(value('War Stats', 'Merits'), '500');
+  assert.strictEqual(value('Dragon Stats', 'Total Merits'), '9,000');
+  assert.strictEqual(value('Historical Season Stats', 'Historical Highest Merits'), '8,000');
+  assert.strictEqual(value('Historical Season Stats', 'Season Defeats'), '4');
+  assert.strictEqual(value('Historical Season Stats', 'Season Winrate'), '33.33%');
+  assert.strictEqual(value('Extra War Stats', 'Victory to Defeat Ratio'), '1,000.0%');
+  assert.strictEqual(value('War Stats', 'Kill to Heal Ratio'), '50.00%');
+  assert.strictEqual(value('War Stats', 'Merit to Power Ratio'), '50.00%');
+
+  const metrics = map.metricsFor(record);
+  assert.strictEqual(metrics.Merits, 500);
+  assert.strictEqual(metrics['Total Merits'], 9000);
+  assert.strictEqual(metrics['Historical Highest Merits'], 8000);
+  assert.strictEqual(metrics['Season Defeats'], 4);
+  assert.strictEqual(metrics['Victory to Defeat Ratio'], 1000);
+});
+
+check('a DragonStats day carries the newest earlier callofstats-only fields', () => {
+  const existing = {
+    dates: ['2026-10-26', '2026-10-15'],
+    byDate: {
+      '2026-10-15': {
+        sections: [
+          { section: 'Tournament of Champion Stats', rows: [{ label: 'ToC Wins', value: '333' }] },
+        ],
+        achievements: [{ name: 'Veteran' }],
+        avatar: 'avatar.png',
+      },
+      '2026-10-26': { sections: [] },
+    },
+    metrics: {
+      '2026-10-15': { 'ToC Wins': 333, Merits: 100 },
+      '2026-10-26': { Merits: 500 },
+    },
+    radar: { '2026-10-15': { Merits: 40 } },
+  };
+  const incoming = {
+    dates: ['2026-10-28'],
+    byDate: {
+      '2026-10-28': {
+        sections: [{ section: 'War Stats', rows: [{ label: 'Merits', value: '700' }] }],
+        achievements: [],
+      },
+    },
+    metrics: { '2026-10-28': { Merits: 700 } },
+    radar: {},
+  };
+
+  const carried = carryForward(existing, incoming, '2026-10-28');
+  const entry = carried.byDate['2026-10-28'];
+  const toc = entry.sections
+    .find((item) => item.section === 'Tournament of Champion Stats')
+    ?.rows.find((row) => row.label === 'ToC Wins');
+  assert.strictEqual(toc.value, '333');
+  assert.strictEqual(entry.achievements.length, 1);
+  assert.strictEqual(entry.avatar, 'avatar.png');
+  assert.strictEqual(carried.metrics['2026-10-28']['ToC Wins'], 333);
+  assert.strictEqual(carried.metrics['2026-10-28'].Merits, 700);
+  assert.deepStrictEqual(carried.radar['2026-10-28'], { Merits: 40 });
+});
+
+check('callofstats labels use the published section names', () => {
+  assert.strictEqual(sectionFor('ToC Wins'), 'Tournament of Champion Stats');
+  assert.strictEqual(sectionFor('RoW League Winrate'), 'Root of War League Stats');
+  assert.strictEqual(sectionFor('Highest RoW Score'), 'Roots of War Stats');
+  assert.strictEqual(sectionFor('T1 Kills'), 'Historic Tiered Kills');
+  assert.strictEqual(sectionFor('Historical Highest Merits'), 'Historical Season Stats');
+  assert.strictEqual(sectionFor('Times Resource Assistance Given'), 'Extra Resource Stats');
+  assert.strictEqual(sectionFor('Total Resources Gathered'), 'Extra Resource Stats');
+  assert.strictEqual(sectionFor('Alliance Donations'), 'Alliance Activity');
+  assert.strictEqual(sectionFor('Behemoth Raid Wins'), 'Alliance Activity');
+  assert.strictEqual(sectionFor('Build Time'), 'Alliance Activity');
+  assert.strictEqual(sectionFor('T4/T5 Units Rss Healed'), 'Advanced War Stats');
+  assert.strictEqual(sectionFor('Merits'), 'War Stats');
+  assert.strictEqual(sectionFor('Merit to Power Ratio'), 'War Stats');
+  assert.strictEqual(sectionFor('Victory to Defeat Ratio'), 'Extra War Stats');
+  assert.strictEqual(sectionFor('Faction'), '');
 });
 
 check('a complete player file conforms to the contract', () => {

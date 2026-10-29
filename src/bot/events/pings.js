@@ -4,6 +4,11 @@ const { CONFIG } = require('../../config');
 const { msUntil } = require('../../utils/time');
 const { sendPing, updateEventMessage, deleteReminderMessage, markReminderEnded } = require('./posting');
 
+// In-memory cooldown: never ping the same (event, window) more than once per
+// cooldown window, even if the DB flag write failed or two bot instances raced.
+const PING_COOLDOWN_MS = 5 * 60 * 1000;
+const lastPinged = new Map(); // `${eventId}:${windowKey}` -> timestamp
+
 async function checkEventPings(client) {
   const now = Date.now();
   const horizon = new Date(now - 24 * 60 * 60 * 1000);
@@ -21,6 +26,11 @@ async function checkEventPings(client) {
     for (const windowInfo of CONFIG.BEHAVIOR.PING_WINDOWS) {
       if (event[windowInfo.key]) continue;
       if (remainingMs > windowInfo.msBefore) continue;
+
+      const cooldownKey = `${event.id}:${windowInfo.key}`;
+      const last = lastPinged.get(cooldownKey);
+      if (last !== undefined && now - last < PING_COOLDOWN_MS) continue;
+      lastPinged.set(cooldownKey, now);
 
       try {
         const windowLabel = windowInfo.label;

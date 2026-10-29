@@ -24,6 +24,31 @@ const crypto = require('crypto');
  * same player days apart (405M/442M/419M vs Wood/Ore/Mana).
  */
 
+/**
+ * The bucket callofstats publishes for players with no alliance. DragonStats
+ * leaves the alliance field empty instead; publishing the same bucket keeps
+ * the alliances tab identical whichever source wrote the day.
+ */
+const UNAFFILIATED_NAME = 'Not In An Alliance';
+const UNAFFILIATED_ID = '030d6dc7-910b-4186-bafb-13df68dc3a96';
+
+/**
+ * DragonStats publishes a numeric faction code; callofstats published the name
+ * the player sees in game. The codes are stable and were matched against the
+ * overlapping Oct 15/Oct 26 snapshots (172 / 60 / 70 players).
+ */
+const FACTION_NAMES = {
+  1: 'League of Order',
+  2: 'Wilderburg',
+  3: 'Springwardens',
+};
+
+function factionName(raw) {
+  const code = String(raw ?? '').trim();
+  if (!code) return null;
+  return FACTION_NAMES[code] || code;
+}
+
 /** Numbers arrive as strings and are published raw in metrics. */
 function num(value) {
   if (value === null || value === undefined) return null;
@@ -70,7 +95,7 @@ const FIELD_MAP = [
   { from: 'currentlyKing', label: 'Currently King', section: '', kind: TEXT },
   { from: 'daysAsKing', label: 'Days as King', section: '', kind: TEXT },
   { from: 'division', label: 'Division', section: '', kind: TEXT },
-  { from: 'faction', label: 'Faction', section: '', kind: TEXT },
+  { from: 'faction', label: 'Faction', section: '', kind: TEXT, transform: factionName },
   { from: 'leadershipTime', label: 'Leadership Time', section: '', kind: TEXT },
 
   { from: 'infantry_merits', label: 'Infantry Merits', section: 'Advanced War Stats', kind: NUMBER },
@@ -114,6 +139,7 @@ const FIELD_MAP = [
   { from: 't4kill', label: 'T4 Kills', section: 'Historic Tiered Kills', kind: NUMBER },
   { from: 't5kill', label: 'T5 Kills', section: 'Historic Tiered Kills', kind: NUMBER },
 
+  { from: 'maxPvpPoint', label: 'Historical Highest Merits', section: 'Historical Season Stats', kind: NUMBER },
   { from: 'maxRssHealCnt', label: 'Historical Most Resource Healing', section: 'Historical Season Stats', kind: NUMBER },
   { from: 'kvkWinCnt', label: 'Season Victories', section: 'Historical Season Stats', kind: NUMBER },
   { from: 'kvkJoinCnt', label: 'Seasons Played', section: 'Historical Season Stats', kind: NUMBER },
@@ -126,7 +152,9 @@ const FIELD_MAP = [
   { from: 'UnitKill', label: 'Units Killed', section: 'War Stats', kind: NUMBER },
   { from: 'NumberOfHeal', label: 'Units Healed', section: 'War Stats', kind: NUMBER },
   { from: 'NumberOfDeath', label: 'Units Dead', section: 'War Stats', kind: NUMBER },
-  { from: 'totalMerits', label: 'Merits', section: 'War Stats', kind: NUMBER },
+  // callofstats' "Merits" is the KvK/pvp merit counter, not the lifetime
+  // totalMerits DragonStats also exposes.
+  { from: 'kvk_merits', label: 'Merits', section: 'War Stats', kind: NUMBER, fallback: ['pvpPoint'] },
 ];
 
 /**
@@ -137,6 +165,7 @@ const FIELD_MAP = [
  * where the page expects them.
  */
 const EXTRA_MAP = [
+  { from: 'totalMerits', label: 'Total Merits' },
   { from: 'pvpPoint', label: 'PvP Points' },
   { from: 'maxPvpPoint', label: 'Highest PvP Points' },
   { from: 'abyssMerits', label: 'Abyss Merits' },
@@ -208,18 +237,32 @@ const DERIVED = [
     },
   },
   {
+    label: 'Season Defeats',
+    section: 'Historical Season Stats',
+    compute: (player) => {
+      const played = num(player.kvkJoinCnt);
+      const wins = num(player.kvkWinCnt);
+      if (played === null || wins === null) return null;
+      return Math.max(0, played - wins);
+    },
+  },
+  {
     label: 'Victory to Defeat Ratio',
     section: 'Extra War Stats',
+    suffix: '%',
+    digits: 1,
     compute: (player) => {
       const wins = num(player.VictoryTimes);
       const losses = num(player.FailureTimes);
       if (wins === null || losses === null) return null;
-      return losses ? Math.round((wins / losses) * 100) / 100 : wins;
+      return losses ? Math.round((wins / losses) * 1000) / 10 : wins;
     },
   },
   {
     label: 'Season Winrate',
     section: 'Historical Season Stats',
+    suffix: '%',
+    digits: 2,
     compute: (player) => {
       const played = num(player.kvkJoinCnt);
       if (!played) return null;
@@ -229,21 +272,25 @@ const DERIVED = [
   {
     label: 'Kill to Heal Ratio',
     section: 'War Stats',
+    suffix: '%',
+    digits: 2,
     compute: (player) => {
       const kills = num(player.UnitKill);
       const heals = num(player.NumberOfHeal);
       if (kills === null || !heals) return null;
-      return Math.round((kills / heals) * 1000) / 1000;
+      return Math.round((kills / heals) * 10000) / 100;
     },
   },
   {
     label: 'Merit to Power Ratio',
     section: 'War Stats',
+    suffix: '%',
+    digits: 2,
     compute: (player) => {
-      const merits = num(player.totalMerits);
+      const merits = num(player.kvk_merits) ?? num(player.pvpPoint);
       const power = num(player.power);
       if (!merits || !power) return null;
-      return Math.round((merits / power) * 1000) / 1000;
+      return Math.round((merits / power) * 10000) / 100;
     },
   },
 ];
@@ -267,9 +314,20 @@ function allianceId(name) {
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-${variant}${hash.slice(18, 20)}-${hash.slice(20, 32)}`;
 }
 
+/** The first non-empty raw value a field can read, including its fallbacks. */
+function fieldRaw(field, player) {
+  for (const key of [field.from, ...(field.fallback || [])]) {
+    const raw = player[key];
+    if (raw === null || raw === undefined) continue;
+    if (typeof raw === 'string' && !raw.trim()) continue;
+    return raw;
+  }
+  return null;
+}
+
 /** The raw value a field contributes to `metrics`. */
 function metricValue(field, player) {
-  const raw = player[field.from];
+  const raw = field.transform ? field.transform(fieldRaw(field, player)) : fieldRaw(field, player);
   if (field.kind === TEXT) {
     const text = String(raw ?? '').trim();
     return text || null;
@@ -281,7 +339,7 @@ function metricValue(field, player) {
 
 /** The formatted value a field shows in `sections`. */
 function displayValue(field, player) {
-  const raw = player[field.from];
+  const raw = field.transform ? field.transform(fieldRaw(field, player)) : fieldRaw(field, player);
   if (field.kind === TEXT) {
     const text = String(raw ?? '').trim();
     return text || null;
@@ -344,7 +402,13 @@ function sectionsFor(player) {
   for (const field of EXTRA_MAP) push('Dragon Stats', field.label, formatted(player[field.from]));
   for (const derived of DERIVED) {
     const value = derived.compute(player);
-    if (value !== null) push(derived.section, derived.label, value.toLocaleString('en-US'));
+    if (value === null) continue;
+    const text = typeof value === 'number'
+      ? value.toLocaleString('en-US', derived.digits === undefined
+        ? undefined
+        : { minimumFractionDigits: derived.digits, maximumFractionDigits: derived.digits })
+      : String(value);
+    push(derived.section, derived.label, derived.suffix ? `${text}${derived.suffix}` : text);
   }
 
   const known = new Set([
@@ -357,7 +421,10 @@ function sectionsFor(player) {
     push('Dragon Stats', prettify(key), formatted(raw));
   }
 
-  return [...groups].map(([section, rows]) => ({ section, rows }));
+  return [...groups].map(([section, rows]) => ({
+    section,
+    rows: rows.sort((a, b) => a.label.localeCompare(b.label)),
+  }));
 }
 
 /**
@@ -378,7 +445,7 @@ function fromScan(scan, { server, date, existingAlliances = {}, crawledAt = null
     if (!id) continue;
     const name = String(record.name || '').trim();
     const power = num(record.power);
-    const alliance = String(record.alliance || '').trim();
+    const alliance = String(record.alliance || '').trim() || UNAFFILIATED_NAME;
 
     players.push({
       id,
@@ -409,7 +476,10 @@ function fromScan(scan, { server, date, existingAlliances = {}, crawledAt = null
   const alliances = [...byAlliance]
     .sort((a, b) => b[1].power - a[1].power)
     .map(([name, entry], index) => ({
-      id: existingAlliances[name] || allianceId(name),
+      id:
+        name === UNAFFILIATED_NAME
+          ? UNAFFILIATED_ID
+          : existingAlliances[name] || allianceId(name),
       name,
       rank: index + 1,
       stats: {
@@ -433,7 +503,7 @@ function fromScan(scan, { server, date, existingAlliances = {}, crawledAt = null
           rank: num(record.rank),
           power: num(record.power),
           avatar: null,
-          alliance: String(record.alliance || '').trim() || null,
+          alliance: String(record.alliance || '').trim() || UNAFFILIATED_NAME,
           sections: sectionsFor(record),
           albums: [],
         },
@@ -466,4 +536,6 @@ module.exports = {
   EXTRA_MAP,
   DERIVED,
   IGNORED,
+  FACTION_NAMES,
+  factionName,
 };

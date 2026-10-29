@@ -32,6 +32,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
+const { sectionFor } = require('../src/roster/sections');
 
 const BASE = 'https://callofstats.com';
 const PLAYERS_PREFIX = 'players/';
@@ -274,20 +275,6 @@ function enrichPlayer(player, lordData, targetDate) {
     avatar: lordData.avatar || existingEntry?.avatar || null,
     alliance: existingEntry?.alliance || null,
     sections: [],
-  };
-
-  const sectionFor = (label) => {
-    const l = label.toLowerCase();
-    if (l.includes('kill') || l.includes('defeat') || l.includes('victor') || l.includes('siege') || l.includes('scout')) return 'War Stats';
-    if (l.includes('gather') || l.includes('assistance') || l.includes('resource')) return 'Gathered Resources';
-    if (l.includes('spent')) return 'Historic Resources Spent';
-    if (l.includes('merit') || l.includes('behemoth') || l.includes('build') || l.includes('destruction')) return 'Advanced War Stats';
-    if (l.includes('donation') || l.includes('helps given')) return 'Alliance Activity';
-    if (l.includes('season') || l.includes('historical')) return 'Historical Season Stats';
-    if (l.includes('toc')) return 'ToC Stats';
-    if (l.includes('row')) return 'RoW Stats';
-    if (l.includes('power') || l.includes('troop') || l.includes('building') || l.includes('hero') || l.includes('tech') || l.includes('policy')) return 'Power Spread';
-    return 'Callof Stats';
   };
 
   const bySection = new Map();
