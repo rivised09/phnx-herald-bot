@@ -12,10 +12,21 @@ const client = new Client({
   ],
 });
 
+const LOGIN_TIMEOUT_MS = 30_000;
+
+async function loginWithTimeout() {
+  return Promise.race([
+    client.login(CONFIG.DISCORD.TOKEN),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Discord login timeout')), LOGIN_TIMEOUT_MS)
+    ),
+  ]);
+}
+
 async function loginWithRetry(retries = 5, delayMs = 10_000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await client.login(CONFIG.DISCORD.TOKEN);
+      await loginWithTimeout();
       return true;
     } catch (err) {
       console.error(`[BOT] Login failed (attempt ${attempt}/${retries}): ${err.message}`);
