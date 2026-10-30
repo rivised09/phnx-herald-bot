@@ -26,6 +26,7 @@ const map = require('../src/dragon/map');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 const { carryForward } = require('../src/roster/carry');
+const { createProgress } = require('../src/utils/progress');
 
 const PLAYERS = 'players';
 const ALLIANCES = 'alliances';
@@ -247,13 +248,47 @@ async function scrapeServer(server, args, scanIndex, store) {
   }
 
   let bytes = 0;
-  bytes += await store.put(snapshotKey, snapshot, { cacheControl: 'public, max-age=3600' });
+  const snapshotBytes = await store.put(snapshotKey, snapshot, {
+    cacheControl: 'public, max-age=3600',
+  });
+  bytes += snapshotBytes;
+  console.log(`[SCRAPE] wrote ${snapshotKey} · ${describe(snapshotBytes)}`);
+
+  const playerProgress = createProgress({ total: players.length, tag: 'SCRAPE' });
+  let playerIndex = 0;
   for (const item of players) {
-    bytes += await store.put(item.key, item.value, { cacheControl: 'public, max-age=3600' });
+    playerIndex += 1;
+    const itemStarted = Date.now();
+    const size = await store.put(item.key, item.value, { cacheControl: 'public, max-age=3600' });
+    bytes += size;
+    playerProgress.item({
+      index: playerIndex,
+      id: path.basename(item.key, '.json'),
+      name: item.value?.name,
+      status: 'done',
+      detail: describe(size),
+      ms: Date.now() - itemStarted,
+    });
   }
+  playerProgress.bar();
+
+  const allianceProgress = createProgress({ total: alliances.length, tag: 'SCRAPE' });
+  let allianceIndex = 0;
   for (const item of alliances) {
-    bytes += await store.put(item.key, item.value, { cacheControl: 'public, max-age=3600' });
+    allianceIndex += 1;
+    const itemStarted = Date.now();
+    const size = await store.put(item.key, item.value, { cacheControl: 'public, max-age=3600' });
+    bytes += size;
+    allianceProgress.item({
+      index: allianceIndex,
+      id: null,
+      name: item.value?.name,
+      status: 'done',
+      detail: `alliance · ${describe(size)}`,
+      ms: Date.now() - itemStarted,
+    });
   }
+  allianceProgress.bar();
 
   const index = await buildIndex(store, existingIndex, {
     server,

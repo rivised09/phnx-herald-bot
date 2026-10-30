@@ -59,6 +59,15 @@ const PLAYER_ENTRY = O({
     }),
     { source: 'fallback' },
   ),
+  albums: A(
+    O({
+      url: S(),
+      likes: N({ nullable: true }),
+      postedAt: S({ nullable: true }),
+      caption: S({ nullable: true }),
+    }),
+    { source: 'fallback', note: 'Image gallery with per-image likes for this date.' },
+  ),
 });
 
 /** One player's whole history: the file the profile page reads. */

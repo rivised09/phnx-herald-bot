@@ -141,6 +141,71 @@ function readAvatar() {
   }
 }
 
+/** The snapshot date the page's numbers refer to, as the source labels it. */
+function readPageDate() {
+  const el = document.querySelector('[data-current-date]');
+  const fromEl = el && el.getAttribute('data-current-date');
+  if (fromEl) return fromEl;
+  const body = document.body && document.body.getAttribute('data-current-date');
+  if (body) return body;
+  const root = document.documentElement && document.documentElement.getAttribute('data-current-date');
+  return root || null;
+}
+
+/**
+ * `[{ url, likes, postedAt, caption }]` for the gallery images on a lord page.
+ *
+ * Each image link is a base64 `image-proxy` URL, so the original CDN path - and
+ * the day the shot was uploaded - is decoded out of the payload. That date is
+ * what makes an album readable per snapshot date: the day the page was scraped
+ * is not the day the picture was posted.
+ */
+function readAlbums() {
+  const pageDate = (() => {
+    const el = document.querySelector('[data-current-date]');
+    const fromEl = el && el.getAttribute('data-current-date');
+    if (fromEl) return fromEl;
+    const body = document.body && document.body.getAttribute('data-current-date');
+    if (body) return body;
+    const root = document.documentElement && document.documentElement.getAttribute('data-current-date');
+    return root || null;
+  })();
+
+  const postedDate = (url) => {
+    let target = url;
+    const proxy = url.match(/image-proxy\/([A-Za-z0-9+/=]+)$/);
+    if (proxy) {
+      try {
+        target = atob(proxy[1]);
+      } catch {
+        target = url;
+      }
+    }
+    const match = target.match(/(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : null;
+  };
+
+  const albums = [];
+  document.querySelectorAll('.gallery-item').forEach((el) => {
+    if (el.querySelector('.empty-slot')) return;
+    const img = el.querySelector('img');
+    if (!img) return;
+    const url = img.src || img.getAttribute('data-src');
+    if (!url) return;
+
+    const likeEl = el.querySelector('.gallery-like-count') || el.querySelector('.gallery-heart');
+    const likes = likeEl ? likeEl.textContent.replace(/\s+/g, ' ').trim() : null;
+
+    albums.push({
+      url,
+      likes,
+      postedAt: postedDate(url) || pageDate,
+      caption: img.alt || null,
+    });
+  });
+  return albums;
+}
+
 /**
  * The source's own playstyle hexagon: six percentile axes for the selected date.
  *
@@ -295,6 +360,8 @@ module.exports = {
   readAchievements,
   readNameHistory,
   readAvatar,
+  readPageDate,
+  readAlbums,
   readPlaystyle,
   readMemberIds,
   queryVariants,

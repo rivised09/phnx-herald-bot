@@ -23,7 +23,9 @@
     "dragon:map": "node scripts/dragon-map.js",
     "scrape": "node scripts/scrape.js",
     "callofstats:scrape": "node scripts/callofstats-scrape.js",
-    "enrich": "node scripts/enrich.js",    "sync": "node scripts/history.js --latest",
+    "enrich": "node scripts/enrich.js",
+    "clean:albums": "node scripts/clean-top-level-albums.js",
+    "debug:player": "node scripts/debug-player.js",    "sync": "node scripts/history.js --latest",
     "postinstall": "prisma generate && prisma generate --schema prisma-roster/schema.prisma"
   },
   "keywords": [],

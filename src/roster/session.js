@@ -238,6 +238,82 @@ async function saveSession(context) {
   return persistSessionState(state);
 }
 
+// --------------------------------------------------- per-account sessions ---
+
+/**
+ * Striped scraping keeps one saved session per account, so each account brings
+ * its own quota to a run. Sessions are a map keyed by account index, stored
+ * under the same file + settings-table pattern as the single session.
+ */
+const ACCOUNT_SESSIONS_KEY = 'callofstats_account_sessions:v1';
+
+const ACCOUNT_SESSIONS_FILE =
+  process.env.CALLOFSTATS_ACCOUNT_SESSIONS_FILE ||
+  path.join(__dirname, '..', '..', 'data', 'callofstats-sessions.json');
+
+function readLocalAccountSessions() {
+  try {
+    if (!fs.existsSync(ACCOUNT_SESSIONS_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(ACCOUNT_SESSIONS_FILE, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function readAccountSessions() {
+  try {
+    const prisma = require('./db');
+    const row = await prisma.setting.findUnique({ where: { key: ACCOUNT_SESSIONS_KEY } });
+    if (row?.value) {
+      const parsed = JSON.parse(row.value);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {
+    // Not fatal - the local copy still carries the sessions.
+  }
+  return readLocalAccountSessions();
+}
+
+async function writeAccountSessions(map) {
+  try {
+    fs.mkdirSync(path.dirname(ACCOUNT_SESSIONS_FILE), { recursive: true });
+    fs.writeFileSync(ACCOUNT_SESSIONS_FILE, JSON.stringify(map));
+  } catch (err) {
+    console.warn('[ROSTER] Could not persist account sessions file:', err.message);
+  }
+  try {
+    const prisma = require('./db');
+    const value = JSON.stringify(map);
+    await prisma.setting.upsert({
+      where: { key: ACCOUNT_SESSIONS_KEY },
+      create: { key: ACCOUNT_SESSIONS_KEY, value },
+      update: { value },
+    });
+  } catch {
+    // Not fatal - the local copy still works.
+  }
+}
+
+/**
+ * The saved session for one account, or null when that account has never
+ * logged in through the striped path. Account 0 also falls back to the legacy
+ * single session, so an existing login is reused before a fresh one happens.
+ */
+async function loadAccountSession(index) {
+  const map = await readAccountSessions();
+  const entry = map[String(index)];
+  if (entry && Array.isArray(entry.cookies) && entry.cookies.length) return entry;
+  if (Number(index) === 0) return loadSession();
+  return null;
+}
+
+async function saveAccountSession(index, state) {
+  const map = await readAccountSessions();
+  map[String(index)] = state;
+  await writeAccountSessions(map);
+}
+
 /** Cookie names and ages for the log; values are tokens and never printed. */
 function describeCookies(state) {
   if (!state || !Array.isArray(state.cookies)) return 'no session';
@@ -445,11 +521,10 @@ function pageTitle(html) {
  */
 async function sidecarLogin({ username, password }) {
   const sidecar = require('./sidecar');
-  const result = await sidecar.request(
-    'login',
-    { loginUrl: LOGIN_URL, username, password, timeoutMs: LOGIN_TIMEOUT_MS },
-    LOGIN_TIMEOUT_MS + 15000,
-  );
+  const proxy = require('./http').currentProxy() || undefined;
+  const args = { loginUrl: LOGIN_URL, username, password, timeoutMs: LOGIN_TIMEOUT_MS };
+  if (proxy) args.proxy = proxy;
+  const result = await sidecar.request('login', args, LOGIN_TIMEOUT_MS + 15000);
 
   const cookies = Array.isArray(result.cookies) ? result.cookies : [];
   if (String(result.url || '').includes('/login') || !cookies.length) {
@@ -457,7 +532,7 @@ async function sidecarLogin({ username, password }) {
     err.code = 'BAD_CREDENTIALS';
     throw err;
   }
-  return { cookies, url: String(result.url || '') };
+  return { cookies, url: String(result.url || ''), proxy };
 }
 
 /**
@@ -476,7 +551,7 @@ async function sidecarLogin({ username, password }) {
 async function loginViaSidecar(context, credentials) {
   const { fetchHtml, looksLikeLogin } = require('./http');
 
-  const { cookies } = await sidecarLogin(credentials);
+  const { cookies, proxy: loginProxy } = await sidecarLogin(credentials);
 
   await persistSessionState({ cookies, savedAt: Date.now() });
   try {
@@ -490,7 +565,7 @@ async function loginViaSidecar(context, credentials) {
   // only prove that an anonymous visitor is bounced to /login.
   const cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   const target = probeUrl();
-  const probe = await fetchHtml(target, { cookie });
+  const probe = await fetchHtml(target, { cookie, proxy: loginProxy });
   const title = pageTitle(probe.html);
   const denied = title.includes('email verification') || title.includes('access denied');
 
@@ -617,7 +692,7 @@ async function installRoutedTransport(page) {
   });
 }
 
-async function withAuthedPage(work) {
+async function withAuthedPage(work, { forceLogin = false } = {}) {
   const pw = requirePlaywright();
   // Renew first when the clearance is about to lapse, so the browser context
   // below is built from cookies that still work instead of being launched
@@ -689,11 +764,17 @@ async function withAuthedPage(work) {
 
       try {
         const target = probeUrl();
-        await page.goto(target, { waitUntil: 'domcontentloaded' });
-        if (!(await protectedPageAccepted(page, target))) {
-          console.log('[ROSTER] Session no longer accepted, logging in again.');
-          console.log('[ROSTER] Session state:', describeCookies(storageState));
+        if (forceLogin) {
+          // A refusal that only covers data pages can still pass the probe:
+          // the account has to be replaced, not just re-probed.
           await loginNow();
+        } else {
+          await page.goto(target, { waitUntil: 'domcontentloaded' });
+          if (!(await protectedPageAccepted(page, target))) {
+            console.log('[ROSTER] Session no longer accepted, logging in again.');
+            console.log('[ROSTER] Session state:', describeCookies(storageState));
+            await loginNow();
+          }
         }
       } catch (err) {
         // A stale or malformed session should trigger a fresh login, not fail.
@@ -725,6 +806,9 @@ module.exports = {
   loadSession,
   saveSession,
   persistSessionState,
+  loadAccountSession,
+  saveAccountSession,
+  sidecarLogin,
   requirePlaywright,
   rotateCredentials,
   accountCount,

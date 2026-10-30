@@ -18,20 +18,24 @@
  * Files are written snapshot/player/alliance first and index.json last, same
  * as the dragonstats scrape, so a reader never sees a partial publish.
  *
- * Parallelism: N Playwright browser contexts, each logging in with a separate
- * callofstats account. Players are sharded across contexts.
+ * Transport: documents are fetched through the Python sidecar (Chrome TLS
+ * fingerprint) with the saved session and parsed in one reused browser - see
+ * src/roster/lord.js. The source refuses an account that reads too fast, so
+ * requests are paced with jitter rather than run in parallel, and a refusal
+ * that survives a renewal swaps to the next configured account.
  */
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const { chromium } = require('playwright');
-const { sandboxEnabled } = require('../src/browser');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 const { sectionFor } = require('../src/roster/sections');
+const { createLordSource } = require('../src/roster/lord');
+const { accountCount } = require('../src/roster/session');
+const sidecar = require('../src/roster/sidecar');
+const { createProgress } = require('../src/utils/progress');
 
-const BASE = 'https://callofstats.com';
 const PLAYERS_PREFIX = 'players/';
 const ALLIANCES_PREFIX = 'alliances/';
 const SNAPSHOTS_PREFIX = 'snapshots/';
@@ -40,6 +44,7 @@ function parseArgs(argv) {
   const args = {
     server: null,
     concurrency: null,
+    stripe: 0,
     out: null,
     dryRun: false,
   };
@@ -47,11 +52,12 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--server') args.server = argv[++i];
     else if (arg === '--concurrency') args.concurrency = Number(argv[++i]) || 4;
+    else if (arg === '--stripe') args.stripe = Number(argv[++i]) || 0;
     else if (arg === '--out') args.out = argv[++i];
     else if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--help' || arg === '-h') {
       console.log(
-        'usage: npm run callofstats:scrape -- --server 973 [--concurrency N] [--out <dir>] [--dry-run]',
+        'usage: npm run callofstats:scrape -- --server 973 [--concurrency N] [--stripe N] [--out <dir>] [--dry-run]',
       );
       process.exit(0);
     } else {
@@ -115,200 +121,9 @@ function createStore({ dir }) {
   };
 }
 
-function accountList() {
-  const split = (value) =>
-    String(value || '')
-      .split(',')
-      .map((part) => part.trim())
-      .filter(Boolean);
-
-  const users = split(process.env.CALLOFSTATS_USERNAMES || process.env.CALLOFSTATS_USERNAME);
-  if (!users.length) return [];
-
-  const passwordRaw = String(
-    process.env.CALLOFSTATS_PASSWORDS || process.env.CALLOFSTATS_PASSWORD || '',
-  ).trim();
-  const passwords = split(passwordRaw);
-
-  const aligned =
-    passwords.length === users.length
-      ? passwords
-      : users.length === 1
-        ? [passwordRaw]
-        : passwords;
-
-  return users
-    .map((username, index) => ({ username, password: aligned[index] || '' }))
-    .filter((account) => account.password);
-}
-
 /** The date this scrape captures - today in YYYY-MM-DD. */
 function today() {
   return new Date().toISOString().slice(0, 10);
-}
-
-/**
- * One authenticated browser context using a specific callofstats account.
- */
-class AuthedContext {
-  constructor(index, pw, accounts) {
-    this.index = index;
-    this.pw = pw;
-    this.accounts = accounts;
-    this.accountIdx = index % accounts.length;
-    this.browser = null;
-    this.context = null;
-    this.page = null;
-  }
-
-  async start() {
-    this.browser = await this.pw.chromium.launch({
-      headless: true,
-      chromiumSandbox: sandboxEnabled(),
-    });
-    this.context = await this.browser.newContext();
-    this.page = await this.context.newPage();
-    this.page.setDefaultTimeout(30000);
-    this.page.setDefaultNavigationTimeout(30000);
-    await this.login();
-    return this;
-  }
-
-  async login() {
-    const account = this.accounts[this.accountIdx % this.accounts.length];
-    this.accountIdx += 1;
-
-    const page = this.page;
-    await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded' });
-    await page.fill('input[name="username"]', account.username);
-    await page.fill('input[name="password"]', account.password);
-
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => {}),
-      page.click('button[type="submit"]').catch(() => page.click('form button')),
-    ]);
-
-    if ((page.url() || '').includes('/login')) {
-      const err = new Error(`CallofStats rejected credentials for ${account.username}`);
-      err.code = 'BAD_CREDENTIALS';
-      throw err;
-    }
-    console.log(`  [context ${this.index}] logged in as ${account.username}`);
-  }
-
-  /**
-   * Navigate to a lord page and wait for client-rendered content.
-   * Returns false if we can't reach it even after re-login.
-   */
-  async gotoLord(playerId) {
-    const url = `${BASE}/lord/${playerId}`;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-      try {
-        await this.page.waitForSelector('.stat-item, .gallery-item, .history-item', {
-          timeout: 8000,
-        });
-      } catch {
-        // Selector might not exist on all pages
-      }
-
-      if (this.page.url().includes('/login') || !this.page.url().includes('/lord/')) {
-        await this.login();
-        continue;
-      }
-      return true;
-    }
-    return false;
-  }
-
-  async close() {
-    if (this.context) await this.context.close();
-    if (this.browser) await this.browser.close();
-  }
-}
-
-/**
- * Extracts enrichment data from a rendered callofstats lord page.
- */
-function extractLordData(page) {
-  return page.evaluate(() => {
-    const data = {
-      nameHistory: [],
-      albums: [],
-      avatar: null,
-      stats: {},
-      date: null,
-    };
-
-    // Date the data refers to
-    let lordDate = null;
-    const dateEl = document.querySelector('[data-current-date]');
-    if (dateEl) lordDate = dateEl.getAttribute('data-current-date');
-    if (!lordDate && document.body) lordDate = document.body.getAttribute('data-current-date');
-    if (!lordDate && document.documentElement) lordDate = document.documentElement.getAttribute('data-current-date');
-    data.date = lordDate;
-
-    // Avatar - skip the placeholder image
-    let avatar = null;
-    const avatars = document.querySelectorAll('img.profile-picture, .profile-picture > img');
-    for (const img of avatars) {
-      const src = img.src || img.getAttribute('data-src') || '';
-      if (!src.includes('codweb_all_three_avatar') && !src.includes('/static/')) {
-        avatar = img.src || img.getAttribute('data-src') || null;
-        break;
-      }
-    }
-    data.avatar = avatar;
-
-    // Name history
-    document.querySelectorAll('.history-item').forEach((el) => {
-      const name = el.textContent.replace(/\s+/g, ' ').trim();
-      if (name && !data.nameHistory.includes(name)) data.nameHistory.push(name);
-    });
-
-    // Gallery album images with likes
-    document.querySelectorAll('.gallery-item').forEach((el) => {
-      const img = el.querySelector('img');
-      const likeCount = el.querySelector('.gallery-like-count');
-      const likeHeart = el.querySelector('.gallery-heart');
-      const emptySlot = el.querySelector('.empty-slot');
-
-      if (emptySlot) return;
-
-      const url = img ? (img.src || img.getAttribute('data-src')) : null;
-      if (!url) return;
-
-      let likes = null;
-      if (likeCount) likes = likeCount.textContent.replace(/\s+/g, ' ').trim();
-      else if (likeHeart) likes = likeHeart.textContent.replace(/\s+/g, ' ').trim();
-
-      const alt = img ? img.alt || null : null;
-      let postedAt = null;
-      if (url) {
-        const dateMatch = url.match(/(\d{4}-\d{2}-\d{2})/);
-        if (dateMatch) postedAt = dateMatch[1];
-      }
-
-      data.albums.push({
-        url,
-        likes,
-        postedAt: postedAt || data.date || null,
-        caption: alt || null,
-      });
-    });
-
-    // All stats
-    document.querySelectorAll('.stat-item').forEach((item) => {
-      const label = item.querySelector('.subtle');
-      const value = item.querySelector('.value');
-      if (label && value) {
-        data.stats[label.textContent.replace(/\s+/g, ' ').trim()] =
-          value.textContent.replace(/\s+/g, ' ').trim();
-      }
-    });
-
-    return data;
-  });
 }
 
 /**
@@ -383,36 +198,90 @@ function enrichPlayer(player, lordData, targetDate) {
 }
 
 /**
- * Processes one shard of players with one account context.
+ * Processes players one at a time through the paced source.
  */
-async function processShard(ctx, store, playerIds, targetDate, dryRun) {
-  const results = { processed: 0, skipped: 0, errors: [], newPlayers: 0 };
+async function processPlayers(source, store, playerIds, targetDate, dryRun) {
+  const results = {
+    processed: 0,
+    skipped: 0,
+    errors: [],
+    newPlayers: 0,
+    bytes: 0,
+    blocked: false,
+  };
+  const progress = createProgress({ total: playerIds.length, tag: 'CALLSTATS' });
+  let index = 0;
 
   for (const playerId of playerIds) {
+    index += 1;
+    const itemStarted = Date.now();
     try {
       const key = `players/${playerId}.json`;
       let existing;
       try {
         existing = await store.get(key);
       } catch (getErr) {
-        console.warn(`  [context ${ctx.index}] store.get(${key}) threw:`, getErr.message);
         results.errors.push({ playerId, message: `store.get: ${getErr.message}` });
+        progress.item({
+          index,
+          id: playerId,
+          status: 'error',
+          detail: `store.get failed: ${getErr.message}`,
+          ms: Date.now() - itemStarted,
+        });
         continue;
       }
 
-      const ok = await ctx.gotoLord(playerId);
-      if (!ok) {
+      progress.item({
+        index,
+        id: playerId,
+        name: existing?.name,
+        status: 'info',
+        detail: 'fetching lord page…',
+        count: false,
+      });
+      const page = await source.fetch(playerId);
+      if (!page.ok) {
+        if (page.blocked) {
+          results.blocked = true;
+          progress.item({
+            index,
+            id: playerId,
+            name: existing?.name,
+            status: 'error',
+            detail: source.blockedReason,
+            ms: Date.now() - itemStarted,
+          });
+          break;
+        }
         results.errors.push({ playerId, message: 'Could not reach lord page after retries' });
-        console.warn(`  [context ${ctx.index}] player ${playerId}: cannot reach lord page`);
+        progress.item({
+          index,
+          id: playerId,
+          name: existing?.name,
+          status: 'error',
+          detail: 'cannot reach lord page',
+          ms: Date.now() - itemStarted,
+        });
         continue;
       }
 
-      const lordData = await extractLordData(ctx.page);
+      const lordData = await source.read(page.html);
+      if (!lordData) {
+        results.errors.push({ playerId, message: 'Empty lord page' });
+        progress.item({
+          index,
+          id: playerId,
+          name: existing?.name,
+          status: 'error',
+          detail: 'empty lord page',
+          ms: Date.now() - itemStarted,
+        });
+        continue;
+      }
 
-      const playerName = lordData.stats?.['Current Power'] ? null : null;
-      // Try to get the player name from the page title or stats
-      const pageTitle = await ctx.page.title().catch(() => '');
-      const nameMatch = pageTitle.match(/Lord Profile — (.+) \|/);
+      // Try to get the player name from the page title
+      const nameMatch = (lordData.title || '').match(/Lord Profile — (.+) \|/);
       const lordName = nameMatch ? nameMatch[1] : null;
 
       const enriched = enrichPlayer(existing, lordData, targetDate);
@@ -422,30 +291,33 @@ async function processShard(ctx, store, playerIds, targetDate, dryRun) {
 
       if (!dryRun) {
         const bytes = await store.put(key, merged, { cacheControl: 'public, max-age=3600' });
-        results.bytes = (results.bytes || 0) + bytes;
+        results.bytes += bytes;
       }
 
       results.processed += 1;
       if (!existing) results.newPlayers += 1;
-      if (results.processed % 25 === 0) {
-        console.log(`  [context ${ctx.index}] ${results.processed}/${playerIds.length} players`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      progress.item({
+        index,
+        id: playerId,
+        name: merged.name || existing?.name,
+        status: 'done',
+        detail: existing ? (dryRun ? 'dry run, nothing written' : null) : 'new player',
+        ms: Date.now() - itemStarted,
+      });
     } catch (err) {
       results.errors.push({ playerId, message: err.message });
-      console.warn(`  [context ${ctx.index}] player ${playerId}: ${err.message}`);
+      progress.item({
+        index,
+        id: playerId,
+        status: 'error',
+        detail: err.message,
+        ms: Date.now() - itemStarted,
+      });
     }
   }
 
+  progress.bar();
   return results;
-}
-
-/** Shards an array into N roughly equal chunks. */
-function shard(array, n) {
-  const chunks = Array.from({ length: n }, () => []);
-  array.forEach((item, i) => chunks[i % n].push(item));
-  return chunks;
 }
 
 async function main() {
@@ -457,13 +329,19 @@ async function main() {
     );
   }
 
-  const accounts = accountList();
-  if (!accounts.length) {
+  if (accountCount() === 0) {
     throw new Error('No callofstats accounts configured. Set CALLOFSTATS_USERNAME/PASSWORD.');
   }
-  const concurrency = Math.min(args.concurrency || accounts.length, accounts.length);
-  console.log(`[CALLSTATS] Using ${concurrency} context(s) with ${accounts.length} account(s)`);
-  console.log(`[CALLSTATS] Server: #${args.server}`);
+  if ((args.concurrency || 4) > 1) {
+    console.log(
+      '[CALLSTATS] Concurrency is fixed at 1: the source refuses bursts, so requests are paced instead.',
+    );
+  }
+  const stripes = args.stripe > 0 ? Math.min(args.stripe, accountCount()) : 1;
+  console.log(
+    `[CALLSTATS] Server: #${args.server}, ${accountCount()} account(s), ` +
+      `${stripes > 1 ? `striped across ${stripes} accounts` : 'single session'}`,
+  );
 
   const store = createStore({ dir: args.out });
   const targetDate = today();
@@ -474,52 +352,41 @@ async function main() {
   const playerIds = playerKeys.map((key) => path.basename(key, '.json'));
   console.log(`[CALLSTATS] Found ${playerIds.length} existing player files in ${store.label}`);
 
-  const shards = shard(playerIds, concurrency);
-  const pw = require('playwright');
-
+  const source = createLordSource({ tag: 'CALLSTATS', stripe: args.stripe });
   const started = Date.now();
-  const shardResults = await Promise.all(
-    shards.map((ids, i) =>
-      (async () => {
-        let ctx;
-        try {
-          ctx = new AuthedContext(i, pw, accounts);
-          await ctx.start();
-          return await processShard(ctx, store, ids, targetDate, args.dryRun);
-        } catch (err) {
-          console.warn(`[CALLSTATS] context ${i} failed: ${err.message}`);
-          return { processed: 0, skipped: 0, errors: [], bytes: 0, newPlayers: 0 };
-        } finally {
-          if (ctx) await ctx.close();
-        }
-      })(),
-  ));
 
-  let totalProcessed = 0;
-  let totalSkipped = 0;
-  let totalErrors = 0;
-  let totalNewPlayers = 0;
-  let totalBytes = 0;
-  for (const r of shardResults) {
-    totalProcessed += r.processed;
-    totalSkipped += r.skipped;
-    totalErrors += r.errors.length;
-    totalNewPlayers += r.newPlayers || 0;
-    totalBytes += r.bytes || 0;
-    for (const e of r.errors) {
-      console.warn(`[CALLSTATS] error: player ${e.playerId}: ${e.message}`);
-    }
+  let result;
+  try {
+    result = await processPlayers(source, store, playerIds, targetDate, args.dryRun);
+  } finally {
+    await source.close();
+  }
+
+  for (const e of result.errors) {
+    console.warn(`[CALLSTATS] error: player ${e.playerId}: ${e.message}`);
   }
 
   console.log(
-    `[CALLSTATS] Done: ${totalProcessed} processed, ${totalNewPlayers} new, ${totalSkipped} skipped, ` +
-      `${totalErrors} errors, ${describe(totalBytes)}, ${((Date.now() - started) / 1000).toFixed(1)}s`,
+    `[CALLSTATS] Done: ${result.processed} processed, ${result.newPlayers} new, ` +
+      `${result.skipped} skipped, ${result.errors.length} errors, ${describe(result.bytes)}, ` +
+      `${((Date.now() - started) / 1000).toFixed(1)}s`,
   );
 
-  if (totalErrors > 0) process.exitCode = 1;
+  if (result.blocked) {
+    console.warn(`[CALLSTATS] Stopped early: ${result.blockedReason}. Re-run later to continue.`);
+  }
+
+  if (result.errors.length > 0 || result.blocked) process.exitCode = 1;
 }
 
-main().catch((err) => {
-  console.error(`[CALLSTATS] Failed: ${err.stack || err.message}`);
-  process.exitCode = 1;
-});
+main()
+  .catch((err) => {
+    console.error(`[CALLSTATS] Failed: ${err.stack || err.message}`);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // The sidecar owns the network and its Python children inherit the stdio
+    // pipes, so a plain return would leave the process waiting on them.
+    sidecar.shutdown();
+    setTimeout(() => process.exit(process.exitCode || 0), 2500);
+  });

@@ -100,6 +100,11 @@ def op_fetch(args):
     if cookie:
         headers["Cookie"] = cookie
 
+    proxy = args.get("proxy")
+    kwargs = {}
+    if proxy:
+        kwargs["proxy"] = proxy
+
     try:
         resp = Fetcher.get(
             url,
@@ -110,6 +115,7 @@ def op_fetch(args):
             max_redirects=max_redirects,
             timeout=max(1.0, float(timeout_ms) / 1000.0),
             retries=0,
+            **kwargs,
         )
     except Exception as err:  # noqa: BLE001 - every failure is reported upward
         name = type(err).__name__
@@ -134,6 +140,23 @@ def op_fetch(args):
     }
 
 
+from urllib.parse import urlparse
+
+
+def _parse_proxy(value):
+    """Turn a proxy URL into the dict Playwright expects."""
+    if not value:
+        return None
+    parsed = urlparse(str(value))
+    server = "{}://{}:{}".format(parsed.scheme, parsed.hostname, parsed.port)
+    cfg = {"server": server}
+    if parsed.username:
+        cfg["username"] = parsed.username
+    if parsed.password:
+        cfg["password"] = parsed.password
+    return cfg
+
+
 # ------------------------------------------------------------------- login ---
 
 
@@ -143,6 +166,7 @@ def op_login(args):
     login_url = args.get("loginUrl")
     username = args.get("username")
     password = args.get("password")
+    proxy = args.get("proxy")
     if not login_url or username is None or password is None:
         raise ValueError("missing loginUrl/username/password")
 
@@ -183,7 +207,11 @@ def op_login(args):
         except Exception:
             captured["cookies"] = []
 
-    with StealthySession(headless=True, timeout=timeout_ms) as session:
+    with StealthySession(
+        headless=True,
+        timeout=timeout_ms,
+        **({"proxy": _parse_proxy(proxy)} if proxy else {}),
+    ) as session:
         session.fetch(login_url, page_action=fill_and_submit, load_dom=True)
 
     if captured.get("error"):

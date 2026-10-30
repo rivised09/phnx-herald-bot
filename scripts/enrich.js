@@ -19,23 +19,50 @@
  * Writes are additive via src/roster/merge.js: callofstats never erases what
  * dragonstats recorded, and dragonstats never erases what callofstats recorded.
  *
- * Transport: headless Playwright with the saved callofstats session. When the
- * session expires, re-login with the next account. Players are processed
- * sequentially (concurrency 1 recommended) with delays between requests to
- * avoid triggering callofstats' rate limiting.
+ * Transport: the document is fetched through the Python sidecar (Chrome TLS
+ * fingerprint) with the saved callofstats session, paced with jitter, and
+ * parsed in one reused browser - see src/roster/lord.js. The source refuses an
+ * account that reads too fast, so requests are held apart rather than run in
+ * parallel; when a refusal survives a renewal the next account is logged in.
  */
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
-const { sandboxEnabled } = require('../src/browser');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 const { sectionFor } = require('../src/roster/sections');
+const { createLordSource } = require('../src/roster/lord');
+const sidecar = require('../src/roster/sidecar');
+const { createProgress } = require('../src/utils/progress');
 
-const BASE = 'https://callofstats.com';
 const PLAYERS_PREFIX = 'players/';
+
+/** Resume state: tracks which player IDs have been enriched per server+date. */
+const ENRICH_PROGRESS_FILE = path.join(
+  __dirname,
+  '..',
+  'data',
+  'enrich-progress.json',
+);
+
+function progressKey(server, date) {
+  return `${server}:${date || 'latest'}`;
+}
+
+function loadProgress() {
+  try {
+    const raw = fs.readFileSync(ENRICH_PROGRESS_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function saveProgress(progress) {
+  fs.mkdirSync(path.dirname(ENRICH_PROGRESS_FILE), { recursive: true });
+  fs.writeFileSync(ENRICH_PROGRESS_FILE, JSON.stringify(progress, null, 2));
+}
 
 function parseArgs(argv) {
   const args = {
@@ -43,7 +70,10 @@ function parseArgs(argv) {
     date: null,
     out: null,
     concurrency: null,
+    stripe: 0,
     dryRun: false,
+    allPlayers: false,
+    force: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -51,10 +81,13 @@ function parseArgs(argv) {
     else if (arg === '--date') args.date = argv[++i];
     else if (arg === '--out') args.out = argv[++i];
     else if (arg === '--concurrency') args.concurrency = Number(argv[++i]) || 1;
+    else if (arg === '--stripe') args.stripe = Number(argv[++i]) || 0;
     else if (arg === '--dry-run') args.dryRun = true;
+    else if (arg === '--all-players') args.allPlayers = true;
+    else if (arg === '--force') args.force = true;
     else if (arg === '--help' || arg === '-h') {
       console.log(
-        'usage: npm run enrich -- --server 973 [--date YYYY-MM-DD] [--concurrency N] [--out <dir>] [--dry-run]',
+        'usage: npm run enrich -- --server 973 [--date YYYY-MM-DD] [--concurrency N] [--stripe N] [--out <dir>] [--dry-run] [--all-players] [--force]',
       );
       process.exit(0);
     } else {
@@ -149,90 +182,6 @@ function accountList() {
 }
 
 /**
- * Extracts enrichment data from a rendered callofstats lord page.
- */
-function extractLordData(page) {
-  return page.evaluate(() => {
-    const data = {
-      nameHistory: [],
-      albums: [],
-      avatar: null,
-      stats: {},
-      date: null,
-    };
-
-    // Date the data refers to
-    let lordDate = null;
-    const dateEl = document.querySelector('[data-current-date]');
-    if (dateEl) lordDate = dateEl.getAttribute('data-current-date');
-    if (!lordDate && document.body) lordDate = document.body.getAttribute('data-current-date');
-    if (!lordDate && document.documentElement) lordDate = document.documentElement.getAttribute('data-current-date');
-    data.date = lordDate;
-
-    // Avatar - skip the placeholder image
-    let avatar = null;
-    const avatars = document.querySelectorAll('img.profile-picture, .profile-picture > img');
-    for (const img of avatars) {
-      const src = img.src || img.getAttribute('data-src') || '';
-      if (!src.includes('codweb_all_three_avatar') && !src.includes('/static/')) {
-        avatar = img.src || img.getAttribute('data-src') || null;
-        break;
-      }
-    }
-    data.avatar = avatar;
-
-    // Name history
-    document.querySelectorAll('.history-item').forEach((el) => {
-      const name = el.textContent.replace(/\s+/g, ' ').trim();
-      if (name && !data.nameHistory.includes(name)) data.nameHistory.push(name);
-    });
-
-    // Gallery album images with likes
-    document.querySelectorAll('.gallery-item').forEach((el) => {
-      const img = el.querySelector('img');
-      const likeCount = el.querySelector('.gallery-like-count');
-      const likeHeart = el.querySelector('.gallery-heart');
-      const emptySlot = el.querySelector('.empty-slot');
-
-      if (emptySlot) return;
-
-      const url = img ? (img.src || img.getAttribute('data-src')) : null;
-      if (!url) return;
-
-      let likes = null;
-      if (likeCount) likes = likeCount.textContent.replace(/\s+/g, ' ').trim();
-      else if (likeHeart) likes = likeHeart.textContent.replace(/\s+/g, ' ').trim();
-
-      const alt = img ? img.alt || null : null;
-      let postedAt = null;
-      if (url) {
-        const dateMatch = url.match(/(\d{4}-\d{2}-\d{2})/);
-        if (dateMatch) postedAt = dateMatch[1];
-      }
-
-      data.albums.push({
-        url,
-        likes,
-        postedAt: postedAt || data.date || null,
-        caption: alt || null,
-      });
-    });
-
-    // All stats
-    document.querySelectorAll('.stat-item').forEach((item) => {
-      const label = item.querySelector('.subtle');
-      const value = item.querySelector('.value');
-      if (label && value) {
-        data.stats[label.textContent.replace(/\s+/g, ' ').trim()] =
-          value.textContent.replace(/\s+/g, ' ').trim();
-      }
-    });
-
-    return data;
-  });
-}
-
-/**
  * Turns extracted lord-page data into the fields we merge into a player file.
  */
 function enrichPlayer(player, lordData, targetDate) {
@@ -240,20 +189,9 @@ function enrichPlayer(player, lordData, targetDate) {
 
   const incoming = JSON.parse(JSON.stringify(player));
 
-  // Non-date fields: always merge when available
-  if (lordData.avatar) incoming.avatar = lordData.avatar;
+  // Non-date fields: cumulative lists that do not belong to a single day.
   if (lordData.nameHistory && lordData.nameHistory.length) {
     incoming.nameHistory = [...new Set([...(incoming.nameHistory || []), ...lordData.nameHistory])];
-  }
-  if (lordData.albums && lordData.albums.length) {
-    incoming.albums = [...(incoming.albums || [])];
-    const existingUrls = new Set(incoming.albums.map((a) => a.url));
-    for (const album of lordData.albums) {
-      if (!existingUrls.has(album.url)) {
-        incoming.albums.push(album);
-        existingUrls.add(album.url);
-      }
-    }
   }
 
   // Date-specific fields: stats and byDate entry
@@ -275,6 +213,8 @@ function enrichPlayer(player, lordData, targetDate) {
     avatar: lordData.avatar || existingEntry?.avatar || null,
     alliance: existingEntry?.alliance || null,
     sections: [],
+    albums: lordData.albums || existingEntry?.albums || [],
+    achievements: lordData.achievements || existingEntry?.achievements || [],
   };
 
   const bySection = new Map();
@@ -310,96 +250,136 @@ function enrichPlayer(player, lordData, targetDate) {
 }
 
 /**
- * Processes players sequentially with one browser context, re-logging in when
- * the session expires.
+ * Processes players sequentially through one paced source.
+ *
+ * The source paces its own requests and stops once every account has been
+ * refused, so a run that hits the wall ends with the resume state intact
+ * instead of recording hundreds of identical failures.
  */
-async function processPlayers(pw, accounts, store, playerIds, targetDate, dryRun) {
-  const results = { processed: 0, skipped: 0, errors: [], bytes: 0 };
-  let accountIdx = 0;
-
-  const browser = await pw.chromium.launch({ headless: true, chromiumSandbox: sandboxEnabled() });
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  page.setDefaultTimeout(30000);
-  page.setDefaultNavigationTimeout(30000);
-
-  async function login() {
-    const account = accounts[accountIdx % accounts.length];
-    accountIdx += 1;
-    console.log(`  Logging in as ${account.username} (account ${accountIdx} of ${accounts.length})`);
-
-    await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded' });
-    await page.fill('input[name="username"]', account.username);
-    await page.fill('input[name="password"]', account.password);
-
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => {}),
-      page.click('button[type="submit"]').catch(() => page.click('form button')),
-    ]);
-
-    if ((page.url() || '').includes('/login')) {
-      const err = new Error(`CallofStats rejected credentials for ${account.username}`);
-      err.code = 'BAD_CREDENTIALS';
-      throw err;
-    }
-  }
-
-  async function gotoLord(playerId) {
-    const url = `${BASE}/lord/${playerId}`;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await page.goto(url, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(3500);
-
-      if (page.url().includes('/login') || !page.url().includes('/lord/')) {
-        try {
-          await login();
-        } catch (err) {
-          if (accountIdx >= accounts.length * 2) {
-            console.warn(`  All accounts exhausted`);
-            return false;
-          }
-          continue;
-        }
-        continue;
-      }
-      return true;
-    }
-    return false;
-  }
+async function processPlayers(
+  store,
+  playerIds,
+  targetDate,
+  dryRun,
+  force,
+  progressSet,
+  progressSaveCb,
+  progressObj,
+  progressKeyName,
+  stripe = 0,
+  tag = 'ENRICH',
+) {
+  const results = { processed: 0, skipped: 0, errors: [], bytes: 0, blocked: false };
+  const progress = createProgress({ total: playerIds.length, tag });
+  const source = createLordSource({ tag, stripe, date: targetDate });
 
   try {
-    await login();
-
+    let index = 0;
     for (const playerId of playerIds) {
+      index += 1;
+      const itemStarted = Date.now();
       try {
         const key = `players/${playerId}.json`;
         let existing;
         try {
           existing = await store.get(key);
         } catch (getErr) {
-          console.warn(`store.get(${key}) threw:`, getErr.message);
           results.errors.push({ playerId, message: `store.get: ${getErr.message}` });
+          progress.item({
+            index,
+            id: playerId,
+            status: 'error',
+            detail: `store.get failed: ${getErr.message}`,
+            ms: Date.now() - itemStarted,
+          });
           continue;
         }
         if (!existing) {
           results.skipped += 1;
+          progress.item({ index, id: playerId, status: 'skipped', detail: 'no player file' });
           continue;
         }
 
-        // Skip players that already have avatar populated (fully enriched)
-        if (existing.avatar && existing.avatar.includes('image-proxy')) {
+        // Skip players already enriched for this specific date. Each date is
+        // independent, so enriching Oct 29 does not make Oct 28 done.
+        const dateEntry = existing.byDate?.[targetDate];
+        const hasDateAvatar = Boolean(dateEntry?.avatar);
+        const hasDateAlbums = Array.isArray(dateEntry?.albums) && dateEntry.albums.length > 0;
+        if (!force && (hasDateAvatar || hasDateAlbums)) {
           results.skipped += 1;
+          progress.item({
+            index,
+            id: playerId,
+            name: existing.name,
+            status: 'skipped',
+            detail: `already enriched for ${targetDate || 'latest'}`,
+          });
           continue;
         }
 
-        const ok = await gotoLord(playerId);
-        if (!ok) {
+        // Skip players already enriched in a previous run of this same command
+        // (resume support). This is always respected, even with --force, so a
+        // rate-limited run picks up where it stopped instead of restarting.
+        if (progressSet && progressSet.has(playerId)) {
+          results.skipped += 1;
+          progress.item({
+            index,
+            id: playerId,
+            name: existing.name,
+            status: 'skipped',
+            detail: 'already enriched (resume)',
+          });
+          continue;
+        }
+
+        progress.item({
+          index,
+          id: playerId,
+          name: existing.name,
+          status: 'info',
+          detail: 'fetching lord page…',
+          count: false,
+        });
+        const page = await source.fetch(playerId);
+        if (!page.ok) {
+          if (page.blocked) {
+            results.blocked = true;
+            progress.item({
+              index,
+              id: playerId,
+              name: existing.name,
+              status: 'error',
+              detail: source.blockedReason,
+              ms: Date.now() - itemStarted,
+            });
+            break;
+          }
           results.errors.push({ playerId, message: 'Could not reach lord page' });
-          console.warn(`  player ${playerId}: cannot reach lord page`);
+          progress.item({
+            index,
+            id: playerId,
+            name: existing.name,
+            status: 'error',
+            detail: 'cannot reach lord page',
+            ms: Date.now() - itemStarted,
+          });
           continue;
         }
 
-        const lordData = await extractLordData(page);
+        const lordData = await source.read(page.html);
+        if (!lordData) {
+          results.errors.push({ playerId, message: 'Empty lord page' });
+          progress.item({
+            index,
+            id: playerId,
+            name: existing.name,
+            status: 'error',
+            detail: 'empty lord page',
+            ms: Date.now() - itemStarted,
+          });
+          continue;
+        }
+
         const enriched = enrichPlayer(existing, lordData, targetDate);
         const merged = mergeFile('player', existing, enriched);
 
@@ -409,19 +389,35 @@ async function processPlayers(pw, accounts, store, playerIds, targetDate, dryRun
         }
 
         results.processed += 1;
-        if (results.processed % 10 === 0) {
-          console.log(`  ${results.processed} processed, ${results.skipped} skipped`);
+        progress.item({
+          index,
+          id: playerId,
+          name: merged.name || existing.name,
+          status: 'done',
+          detail: dryRun ? 'dry run, nothing written' : null,
+          ms: Date.now() - itemStarted,
+        });
+        if (progressSet && progressObj) {
+          progressSet.add(playerId);
+          if (!progressObj[progressKeyName].includes(playerId)) {
+            progressObj[progressKeyName].push(playerId);
+          }
+          progressSaveCb();
         }
-
-        // Delay between players to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 3000));
       } catch (err) {
         results.errors.push({ playerId, message: err.message });
-        console.warn(`  player ${playerId}: ${err.message}`);
+        progress.item({
+          index,
+          id: playerId,
+          status: 'error',
+          detail: err.message,
+          ms: Date.now() - itemStarted,
+        });
       }
     }
+    progress.bar();
   } finally {
-    await browser.close();
+    await source.close();
   }
 
   return results;
@@ -440,52 +436,104 @@ async function main() {
   if (!accounts.length) {
     throw new Error('No callofstats accounts configured. Set CALLOFSTATS_USERNAME/PASSWORD.');
   }
-  const concurrency = Math.min(args.concurrency || 1, accounts.length);
-  console.log(`[ENRICH] Using ${concurrency} concurrency with ${accounts.length} account(s)`);
+  if ((args.concurrency || 1) > 1) {
+    console.log(
+      '[ENRICH] Concurrency is fixed at 1: the source refuses bursts, so requests are paced instead.',
+    );
+  }
+  console.log(`[ENRICH] Using ${accounts.length} account(s) for rotation`);
 
   const store = createStore({ dir: args.out });
 
-  const playerKeys = await store.list(PLAYERS_PREFIX);
-  const playerIds = playerKeys.map((key) => path.basename(key, '.json'));
-  console.log(`[ENRICH] Found ${playerIds.length} player files in ${store.label}`);
-
-  const pw = require('playwright');
-
-  // Shard players across concurrency
-  const shards = [];
-  const shardSize = Math.ceil(playerIds.length / concurrency);
-  for (let i = 0; i < playerIds.length; i += shardSize) {
-    shards.push(playerIds.slice(i, i + shardSize));
+  // Prefer the date's own roster from its snapshot: a player who migrated out
+  // is not on the server that day, so enriching them is wasted work. Fall back
+  // to every player file in the bucket when there is no date, no snapshot for
+  // it, or --all-players was passed.
+  let allPlayerIds = null;
+  if (args.date && !args.allPlayers) {
+    const snapshot = await store.get(`snapshots/${args.date}.json`).catch(() => null);
+    const roster = [
+      ...new Set(
+        (snapshot?.players || [])
+          .map((p) => (typeof p === 'string' ? p : p?.id))
+          .filter(Boolean),
+      ),
+    ];
+    if (roster.length) {
+      allPlayerIds = roster;
+      console.log(
+        `[ENRICH] Using ${roster.length} players from snapshots/${args.date}.json (that date's roster)`,
+      );
+    } else {
+      console.warn(
+        `[ENRICH] snapshots/${args.date}.json has no roster; falling back to every player file`,
+      );
+    }
+  }
+  if (!allPlayerIds) {
+    const playerKeys = await store.list(PLAYERS_PREFIX);
+    allPlayerIds = playerKeys.map((key) => path.basename(key, '.json'));
+    console.log(`[ENRICH] Found ${allPlayerIds.length} player files in ${store.label}`);
   }
 
+  // Load resume state: skip players already enriched for this server+date
+  const progress = loadProgress();
+  const key = progressKey(args.server, args.date);
+  if (!progress[key]) progress[key] = [];
+  const processedSet = new Set(progress[key]);
+  const playerIds = allPlayerIds.filter((id) => !processedSet.has(id));
+  if (processedSet.size) {
+    console.log(
+      `[ENRICH] Resuming: ${processedSet.size} players already enriched for ${args.server}:${args.date}, ${playerIds.length} remaining`,
+    );
+  }
+
+  const saveProgressCb = () => {
+    saveProgress(progress);
+  };
+
   const started = Date.now();
-  const shardResults = await Promise.all(
-    shards.map((ids) => processPlayers(pw, accounts, store, ids, args.date, args.dryRun)),
+  const result = await processPlayers(
+    store,
+    playerIds,
+    args.date,
+    args.dryRun,
+    args.force,
+    processedSet,
+    saveProgressCb,
+    progress,
+    key,
+    args.stripe,
+    'ENRICH',
   );
 
-  let totalProcessed = 0;
-  let totalSkipped = 0;
-  let totalErrors = 0;
-  let totalBytes = 0;
-  for (const r of shardResults) {
-    totalProcessed += r.processed;
-    totalSkipped += r.skipped;
-    totalErrors += r.errors.length;
-    totalBytes += r.bytes;
-    for (const e of r.errors) {
-      console.warn(`[ENRICH] error: player ${e.playerId}: ${e.message}`);
-    }
+  for (const e of result.errors) {
+    console.warn(`[ENRICH] error: player ${e.playerId}: ${e.message}`);
   }
 
   console.log(
-    `[ENRICH] Done: ${totalProcessed} processed, ${totalSkipped} skipped, ${totalErrors} errors, ` +
-      `${describe(totalBytes)}, ${((Date.now() - started) / 1000).toFixed(1)}s`,
+    `[ENRICH] Done: ${result.processed} processed, ${result.skipped} skipped, ` +
+      `${result.errors.length} errors, ${describe(result.bytes)}, ` +
+      `${((Date.now() - started) / 1000).toFixed(1)}s`,
   );
 
-  if (totalErrors > 0) process.exitCode = 1;
+  if (result.blocked) {
+    console.warn(
+      `[ENRICH] Stopped early: ${result.blockedReason}. Progress is saved; re-run later to continue.`,
+    );
+  }
+
+  if (result.errors.length > 0 || result.blocked) process.exitCode = 1;
 }
 
-main().catch((err) => {
-  console.error(`[ENRICH] Failed: ${err.stack || err.message}`);
-  process.exitCode = 1;
-});
+main()
+  .catch((err) => {
+    console.error(`[ENRICH] Failed: ${err.stack || err.message}`);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // The sidecar owns the network and its Python children inherit the stdio
+    // pipes, so a plain return would leave the process waiting on them.
+    sidecar.shutdown();
+    setTimeout(() => process.exit(process.exitCode || 0), 2500);
+  });

@@ -42,9 +42,23 @@ function canRead(channel, guild) {
 }
 
 /**
- * `Guild#isReady()` no longer exists in discord.js 14.27, so readiness is
- * inferred from a usable channels manager instead.
+ * Proxy an almanac request to the phoenix-translator bot, which has access to
+ * channels phoenix-herald cannot read (e.g. leadership channels).
  */
+async function proxyToTranslator(path, headers = {}) {
+  const base = CONFIG.APP.TRANSLATOR_API_URL;
+  if (!base) throw new Error('TRANSLATOR_API_URL is not configured');
+
+  const url = `${base.replace(/\/$/, '')}${path}`;
+  const res = await fetch(url, {
+    headers: {
+      'x-almanac-secret': headers['x-almanac-secret'] || '',
+    },
+  });
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status, body };
+}
+
 function resolveGuild(res) {
   const guild = getGuild();
   if (!guild || !guild.channels) {
@@ -94,7 +108,7 @@ function almanacRouter() {
       if (!guild) return;
 
       const fetched = await guild.channels.fetch();
-      const channels = [...fetched.values()]
+      const localChannels = [...fetched.values()]
         .filter((c) => c && c.isTextBased() && !c.isThread() && c.type !== 'GUILD_CATEGORY')
         .filter((c) => canRead(c, guild))
         .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
@@ -106,9 +120,39 @@ function almanacRouter() {
           parentId: c.parentId || null,
           parentName: c.parentId ? fetched.get(c.parentId)?.name || null : null,
           nsfw: Boolean(c.nsfw),
+          source: 'herald',
         }));
 
-      res.json({ channels, guildName: guild.name });
+      // Channels phoenix-herald can't read but the translator can.
+      let translatorChannels = [];
+      try {
+        if (CONFIG.APP.TRANSLATOR_API_URL) {
+          const { status, body } = await proxyToTranslator(
+            '/api/almanac/channels',
+            { 'x-almanac-secret': req.get('x-almanac-secret') || '' },
+          );
+          if (status === 200 && body.channels) {
+            translatorChannels = body.channels.map((c) => ({
+              ...c,
+              source: 'translator',
+            }));
+          }
+        }
+      } catch (err) {
+        console.warn(`[ALMANAC] Translator proxy failed: ${err.message}`);
+      }
+
+      // Merge, preferring local data when both bots can see a channel.
+      const byId = new Map();
+      for (const c of translatorChannels) byId.set(c.id, c);
+      for (const c of localChannels) byId.set(c.id, c);
+
+      res.json({
+        channels: [...byId.values()].sort(
+          (a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name),
+        ),
+        guildName: guild.name,
+      });
     }),
   );
 
@@ -123,9 +167,7 @@ function almanacRouter() {
         (c) => c && c.isTextBased() && !c.isThread() && c.type !== 'GUILD_CATEGORY' && canRead(c, guild),
       );
 
-      // One minimal message per channel: enough to detect change without
-      // re-reading history. Failures are reported per channel, not fatal.
-      const pairs = await Promise.all(
+      const localHeads = await Promise.all(
         readable.map(async (c) => {
           try {
             const msgs = await c.messages.fetch({ limit: 1 });
@@ -137,6 +179,7 @@ function almanacRouter() {
                     id: latest.id,
                     createdAt: latest.createdAt,
                     author: latest.author?.displayName || latest.author?.username || null,
+                    source: 'herald',
                   }
                 : null,
             ];
@@ -146,7 +189,27 @@ function almanacRouter() {
         }),
       );
 
-      res.json({ heads: Object.fromEntries(pairs) });
+      let translatorHeads = {};
+      try {
+        if (CONFIG.APP.TRANSLATOR_API_URL) {
+          const { status, body } = await proxyToTranslator(
+            '/api/almanac/channels/heads',
+            { 'x-almanac-secret': req.get('x-almanac-secret') || '' },
+          );
+          if (status === 200 && body.heads) {
+            translatorHeads = body.heads;
+            for (const [id, head] of Object.entries(translatorHeads)) {
+              head.source = 'translator';
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[ALMANAC] Translator heads proxy failed: ${err.message}`);
+      }
+
+      const heads = { ...translatorHeads, ...Object.fromEntries(localHeads) };
+
+      res.json({ heads });
     }),
   );
 
@@ -162,23 +225,44 @@ function almanacRouter() {
       if (!channel || !channel.isTextBased()) {
         return res.status(404).json({ error: 'Channel not found' });
       }
-      if (!canRead(channel, guild)) {
-        return res.status(403).json({ error: 'Bot cannot read this channel' });
+
+      if (canRead(channel, guild)) {
+        const limit = Math.min(
+          Math.max(Number.parseInt(req.query.limit, 10) || DEFAULT_LIMIT, 1),
+          MAX_LIMIT,
+        );
+        const before = SNOWFLAKE.test(String(req.query.before || '')) ? req.query.before : undefined;
+        const after = SNOWFLAKE.test(String(req.query.after || '')) ? req.query.after : undefined;
+
+        const fetched = await channel.messages.fetch({ limit, before, after });
+        const messages = [...fetched.values()]
+          .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+          .map(serializeMessage);
+
+        return res.json({ messages, channelName: channel.name });
       }
 
-      const limit = Math.min(
-        Math.max(Number.parseInt(req.query.limit, 10) || DEFAULT_LIMIT, 1),
-        MAX_LIMIT,
-      );
-      const before = SNOWFLAKE.test(String(req.query.before || '')) ? req.query.before : undefined;
-      const after = SNOWFLAKE.test(String(req.query.after || '')) ? req.query.after : undefined;
+      // phoenix-herald can't read this channel - proxy to the translator.
+      if (!CONFIG.APP.TRANSLATOR_API_URL) {
+        return res
+          .status(403)
+          .json({ error: 'Bot cannot read this channel' });
+      }
 
-      const fetched = await channel.messages.fetch({ limit, before, after });
-      const messages = [...fetched.values()]
-        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-        .map(serializeMessage);
+      const secret = req.get('x-almanac-secret') || '';
+      const qs = new URLSearchParams();
+      if (req.query.limit) qs.set('limit', String(req.query.limit));
+      if (req.query.before) qs.set('before', String(req.query.before));
+      if (req.query.after) qs.set('after', String(req.query.after));
+      const path = `/api/almanac/channels/${encodeURIComponent(id)}/messages${qs.toString() ? `?${qs.toString()}` : ''}`;
 
-      res.json({ messages, channelName: channel.name });
+      try {
+        const { status, body } = await proxyToTranslator(path, { 'x-almanac-secret': secret });
+        return res.status(status).json(body);
+      } catch (err) {
+        console.warn(`[ALMANAC] Translator messages proxy failed: ${err.message}`);
+        return res.status(502).json({ error: 'Translator unavailable' });
+      }
     }),
   );
 

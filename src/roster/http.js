@@ -31,6 +31,89 @@ const FETCH_TIMEOUT_MS = 20000;
  */
 const MAX_REDIRECTS = 6;
 
+// ---- proxy ----------------------------------------------------------------
+
+/**
+ * One or more proxies, comma-separated. Each entry is a URL like:
+ *
+ *   http://host:port
+ *   http://user:pass@host:port
+ *
+ * When more than one is listed the bot rotates through them per refusal, the
+ * same way it rotates accounts. Put your 10 Webshare proxies as one
+ * comma-separated value and each will carry its own page budget.
+ *
+ * Every fetch and every login uses the sidecar; without it the proxy is unused.
+ */
+function parseProxyList() {
+  const raw = String(process.env.ROSTER_PROXY || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+const PROXY_LIST = parseProxyList();
+
+/** How long a refused proxy rests before it is tried again. */
+const PROXY_COOLDOWN_MS = 10 * 60 * 1000;
+
+let _proxyIndex = 0;
+const _proxyCoolingUntil = new Array(PROXY_LIST.length).fill(0);
+
+/**
+ * The proxy to use for the next request, or null when none is configured or
+ * every proxy is on cooldown.
+ */
+function pickProxy() {
+  if (!PROXY_LIST.length) return null;
+  const now = Date.now();
+  for (let attempt = 0; attempt < PROXY_LIST.length; attempt += 1) {
+    const index = _proxyIndex % PROXY_LIST.length;
+    _proxyIndex = (_proxyIndex + 1) % PROXY_LIST.length;
+    if (_proxyCoolingUntil[index] <= now) return PROXY_LIST[index];
+  }
+  return null; // every proxy is cooling
+}
+
+/**
+ * Marks one proxy as refused and puts it on cooldown so the next request
+ * picks a different one.
+ */
+function markProxyRefused(proxy) {
+  const index = PROXY_LIST.indexOf(proxy);
+  if (index < 0) return;
+  console.warn(`[PROXY] Proxy ${index + 1}/${PROXY_LIST.length} refused; resting it for ${PROXY_COOLDOWN_MS / 60000} minute(s).`);
+  _proxyCoolingUntil[index] = Date.now() + PROXY_COOLDOWN_MS;
+}
+
+/** Number of proxies available to rotate through. */
+function proxyCount() {
+  return PROXY_LIST.length;
+}
+
+/** The proxy most recently picked by currentProxy(), so the caller can reject it after a refusal. */
+let _lastProxy = null;
+
+function currentProxy() {
+  _lastProxy = pickProxy();
+  return _lastProxy;
+}
+
+/**
+ * Marks the proxy that currentProxy() last returned as refused and picks the
+ * next one.  Returns the fresh proxy, or null when every proxy is on cooldown.
+ */
+function rejectCurrentProxy(reason = '') {
+  if (_lastProxy) {
+    markProxyRefused(_lastProxy);
+    if (reason) console.warn(`[PROXY] Rejected: ${reason}`);
+  }
+  _lastProxy = pickProxy();
+  return _lastProxy;
+}
+
 /**
  * Whether the answer is Cloudflare's interstitial rather than the page.
  *
@@ -76,12 +159,11 @@ async function cookieHeader() {
  * back uninterpreted, because the route layer replays the source's own
  * redirects instead of interpreting them as an expired session.
  */
-async function fetchForRoute(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
-  const result = await sidecar.request(
-    'fetch',
-    { url, cookie, timeoutMs, maxRedirects: MAX_REDIRECTS },
-    timeoutMs + 10000,
-  );
+async function fetchForRoute(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS, proxy = null } = {}) {
+  const args = { url, cookie, timeoutMs, maxRedirects: MAX_REDIRECTS };
+  const resolved = proxy || currentProxy();
+  if (resolved) args.proxy = resolved;
+  const result = await sidecar.request('fetch', args, timeoutMs + 10000);
   if (result.redirectLoop) {
     return { redirectLoop: true, status: 0, url: result.url || url, html: '' };
   }
@@ -104,12 +186,11 @@ async function fetchForRoute(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS 
  * Scrapling), which is the part undici cannot imitate and the part the source
  * was using to refuse plain-HTTP reads.
  */
-async function sidecarFetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
-  const result = await sidecar.request(
-    'fetch',
-    { url, cookie, timeoutMs, maxRedirects: MAX_REDIRECTS },
-    timeoutMs + 10000,
-  );
+async function sidecarFetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS, proxy = null } = {}) {
+  const args = { url, cookie, timeoutMs, maxRedirects: MAX_REDIRECTS };
+  const resolved = proxy || currentProxy();
+  if (resolved) args.proxy = resolved;
+  const result = await sidecar.request('fetch', args, timeoutMs + 10000);
 
   const finalUrl = result.url || url;
 
@@ -159,10 +240,10 @@ let sidecarWarned = false;
  * recovery that would have re-logged-in never ran and the pass died with a
  * network error instead of an expired session.
  */
-async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+async function fetchHtml(url, { cookie = null, timeoutMs = FETCH_TIMEOUT_MS, proxy = null } = {}) {
   if (sidecar.enabled()) {
     try {
-      return await sidecarFetchHtml(url, { cookie, timeoutMs });
+      return await sidecarFetchHtml(url, { cookie, timeoutMs, proxy });
     } catch (err) {
       // Availability over purity: a dead Python process must not stop a run.
       // The warning is the tell that the source is being contacted with the
@@ -238,4 +319,7 @@ module.exports = {
   looksLikeChallenge,
   USER_AGENT,
   BASE,
+  currentProxy,
+  rejectCurrentProxy,
+  proxyCount,
 };

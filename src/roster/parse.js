@@ -33,41 +33,61 @@ function clean(html) {
 }
 
 /**
- * Runs `work(parser)` with a single browser page for the duration.
+ * Opens one reusable browser page and returns the parser around it.
  *
- * `parser.parse(html, reader)` installs the document and evaluates the reader
- * in it. Keeping one page alive across the run is what makes parsing cheap:
- * the launch, not the parse, is the expensive part.
+ * `load` installs a document once, `evaluate` runs readers against it, and
+ * `parse` is the one-shot combination. A caller reading several fields from the
+ * same page should load once and evaluate each reader, instead of installing
+ * the same document again per field.
  */
-async function withParser(work) {
+async function createParser() {
   const pw = requirePlaywright();
   const browser = await pw.chromium.launch({
     headless: true,
     chromiumSandbox: sandboxEnabled(),
   });
 
+  const page = await browser.newPage();
+  page.setDefaultTimeout(PARSE_TIMEOUT_MS);
+
+  // The parser needs markup, not the network: cleaned HTML has no scripts
+  // and its relative URLs cannot resolve from about:blank, but an absolute
+  // one - a font, an og:image - would still be fetched under Playwright's
+  // fingerprint. Nothing here needs it, so nothing here may leave.
+  await page.route('**/*', (route) => route.abort());
+
+  return {
+    async load(html) {
+      if (!html) return false;
+      await page.setContent(clean(html), { waitUntil: 'commit' });
+      return true;
+    },
+    evaluate(reader) {
+      return page.evaluate(reader);
+    },
+    async parse(html, reader) {
+      if (!(await this.load(html))) return null;
+      return this.evaluate(reader);
+    },
+    async close() {
+      await browser.close();
+    },
+  };
+}
+
+/**
+ * Runs `work(parser)` with a single browser page for the duration.
+ *
+ * Keeping one page alive across the run is what makes parsing cheap: the
+ * launch, not the parse, is the expensive part.
+ */
+async function withParser(work) {
+  const parser = await createParser();
   try {
-    const page = await browser.newPage();
-    page.setDefaultTimeout(PARSE_TIMEOUT_MS);
-
-    // The parser needs markup, not the network: cleaned HTML has no scripts
-    // and its relative URLs cannot resolve from about:blank, but an absolute
-    // one - a font, an og:image - would still be fetched under Playwright's
-    // fingerprint. Nothing here needs it, so nothing here may leave.
-    await page.route('**/*', (route) => route.abort());
-
-    const parser = {
-      async parse(html, reader) {
-        if (!html) return null;
-        await page.setContent(clean(html), { waitUntil: 'commit' });
-        return page.evaluate(reader);
-      },
-    };
-
     return await work(parser);
   } finally {
-    await browser.close();
+    await parser.close();
   }
 }
 
-module.exports = { withParser };
+module.exports = { createParser, withParser };
