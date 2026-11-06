@@ -127,16 +127,31 @@ function almanacRouter() {
       let translatorChannels = [];
       try {
         if (CONFIG.APP.TRANSLATOR_API_URL) {
+          console.log(
+            `[ALMANAC] Proxying to translator: ${CONFIG.APP.TRANSLATOR_API_URL}`,
+          );
           const { status, body } = await proxyToTranslator(
             '/api/almanac/channels',
             { 'x-almanac-secret': req.get('x-almanac-secret') || '' },
+          );
+          console.log(
+            `[ALMANAC] Translator response: status=${status} channels=${body.channels?.length ?? 0}`,
           );
           if (status === 200 && body.channels) {
             translatorChannels = body.channels.map((c) => ({
               ...c,
               source: 'translator',
             }));
+            console.log(
+              `[ALMANAC] Added ${translatorChannels.length} translator channels`,
+            );
+          } else if (status !== 200) {
+            console.warn(
+              `[ALMANAC] Translator returned non-200: ${status} body=${JSON.stringify(body).slice(0, 200)}`,
+            );
           }
+        } else {
+          console.warn('[ALMANAC] TRANSLATOR_API_URL is not set');
         }
       } catch (err) {
         console.warn(`[ALMANAC] Translator proxy failed: ${err.message}`);
@@ -201,6 +216,9 @@ function almanacRouter() {
             for (const [id, head] of Object.entries(translatorHeads)) {
               head.source = 'translator';
             }
+            console.log(
+              `[ALMANAC] Translator heads: ${Object.keys(translatorHeads).length} channels`,
+            );
           }
         }
       } catch (err) {

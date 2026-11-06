@@ -63,7 +63,16 @@ function clamp(value, min, max) {
 function num(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
-    const parsed = Number(value.replace(/,/g, ''));
+    // Playstyle percentiles are published as "27.28%" and some durations as
+    // "21,520 Sec". Strip both decorations before parsing, otherwise every
+    // radar reading becomes NaN and the hexagon renders empty.
+    const text = value
+      .replace(/,/g, '')
+      .replace(/%/g, '')
+      .replace(/ Sec$/, '')
+      .trim();
+    if (!text) return null;
+    const parsed = Number(text);
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;

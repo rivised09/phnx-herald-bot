@@ -130,6 +130,9 @@ function createLordSource({ tag = 'LORD', stripe = 0, date = null } = {}) {
     const albums = (await page.evaluate(extract.readAlbums)) || [];
     const date = await page.evaluate(extract.readPageDate);
     const title = await page.evaluate(() => document.title || '');
+    const playstyle = (await page.evaluate(extract.readPlaystyle)) || [];
+    const alliance = await page.evaluate(extract.readAlliance);
+    const achievements = (await page.evaluate(extract.readAchievements)) || [];
 
     // The writers key stats by label and map the label to a section
     // themselves, so the section walker's rows are flattened here.
@@ -139,7 +142,10 @@ function createLordSource({ tag = 'LORD', stripe = 0, date = null } = {}) {
       stats[row.label] = row.value;
     }
 
-    return { stats, nameHistory, avatar, albums, date, title };
+    // Playstyle rows carry their own section ('Playstyle') and must not be
+    // flattened into stats, which is keyed by label only. Return them
+    // separately so the caller can write them under their own section.
+    return { stats, nameHistory, avatar, albums, date, title, playstyle, alliance, achievements };
   }
 
   async function close() {
@@ -249,10 +255,11 @@ function createLordSource({ tag = 'LORD', stripe = 0, date = null } = {}) {
         return 1;
       },
 
-      async fetch(playerId) {
+      async fetch(playerId, selectedDate) {
         if (blocked) return fail();
         const urlObj = new URL(`/lord/${playerId}`, BASE);
-        if (date) urlObj.searchParams.set('selected_date', date);
+        const useDate = selectedDate || date;
+        if (useDate) urlObj.searchParams.set('selected_date', useDate);
         const url = urlObj.toString();
         await pace();
         const res = await fetchHtml(url, { cookie: await currentCookie() });
@@ -322,10 +329,11 @@ function createLordSource({ tag = 'LORD', stripe = 0, date = null } = {}) {
       return stripeCount;
     },
 
-    async fetch(playerId) {
+    async fetch(playerId, selectedDate) {
       if (blocked) return fail();
       const urlObj = new URL(`/lord/${playerId}`, BASE);
-      if (date) urlObj.searchParams.set('selected_date', date);
+      const useDate = selectedDate || date;
+      if (useDate) urlObj.searchParams.set('selected_date', useDate);
       const url = urlObj.toString();
 
       for (let attempt = 0; attempt < stripeCount; attempt += 1) {

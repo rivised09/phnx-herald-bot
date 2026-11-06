@@ -152,6 +152,19 @@ function readPageDate() {
   return root || null;
 }
 
+/** The alliance name as displayed on the player's lord page. */
+function readAlliance() {
+  const el =
+    document.querySelector('.alliance-name, .alliance-tag, [data-alliance]') ||
+    [...document.querySelectorAll('h3.higher-label')]
+      .find((h) => /alliance/i.test(h.textContent || ''))
+      ?.closest('.stat-item, .card, .profile-card')
+      ?.querySelector('.value, .alliance-value, .alliance-name');
+  if (!el) return null;
+  const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+  return text || null;
+}
+
 /**
  * `[{ url, likes, postedAt, caption }]` for the gallery images on a lord page.
  *

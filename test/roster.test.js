@@ -987,6 +987,28 @@ async function main() {
       assert.ok(/improved on merits/.test(radar.summary));
     });
 
+    check('radar parses percent-decorated values exported to R2', () => {
+      const built = insights.buildInsights({
+        history: insightHistory,
+        metricsByDate: insightMetrics,
+        radarByDate: {
+          '1999-01-15': {
+            Merits: '27.28%',
+            Behemoths: '57.95%',
+            Gathering: '44.06%',
+            Peacekeeping: '31.16%',
+            Healing: '66.49%',
+            Engineering: '29.72%',
+          },
+        },
+      });
+      assert.strictEqual(built.radar.available, true);
+      assert.deepStrictEqual(
+        built.radar.current.values,
+        [27.28, 57.95, 44.06, 31.16, 66.49, 29.72],
+      );
+    });
+
     check('radar falls back to dates when the season is unknown', () => {
       const built = insights.buildInsights({
         history: insightHistory,

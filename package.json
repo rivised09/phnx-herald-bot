@@ -23,6 +23,7 @@
     "dragon:map": "node scripts/dragon-map.js",
     "scrape": "node scripts/scrape.js",
     "callofstats:scrape": "node scripts/callofstats-scrape.js",
+    "callofstats:scrape:player": "node scripts/callofstats-scrape.js",
     "enrich": "node scripts/enrich.js",
     "clean:albums": "node scripts/clean-top-level-albums.js",
     "debug:player": "node scripts/debug-player.js",    "sync": "node scripts/history.js --latest",
