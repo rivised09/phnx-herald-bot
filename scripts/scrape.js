@@ -28,6 +28,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
 const { allianceResolver } = require('../src/dragon/resolve');
+const { buildLeadershipSummary } = require('../src/roster/leadership');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 const { carryForward } = require('../src/roster/carry');
@@ -174,31 +175,29 @@ async function collect(server, args, scanIndex = 0) {
     };
   }
 
-  return api.withClient(async (client, gate) => {
-    const found = await api.findServer(client, gate, server);
-    if (!found) throw new Error(`DragonStats does not track server #${server}.`);
-    const latest = args.scanDate
-      ? await api.scanOnDate(client, gate, server, args.scanDate)
-      : await api.scanAt(client, gate, server, scanIndex);
-    if (!latest) {
-      throw new Error(
-        args.scanDate
-          ? `Server #${server} has no scan published on ${args.scanDate}.`
-          : `Server #${server} has no scans on DragonStats yet.`,
-      );
-    }
+  const found = await api.findServer(server);
+  if (!found) throw new Error(`DragonStats does not track server #${server}.`);
+  const latest = args.scanDate
+    ? await api.scanOnDate(server, args.scanDate)
+    : await api.scanAt(server, scanIndex);
+  if (!latest) {
+    throw new Error(
+      args.scanDate
+        ? `Server #${server} has no scan published on ${args.scanDate}.`
+        : `Server #${server} has no scans on DragonStats yet.`,
+    );
+  }
 
-    console.log(`[SCRAPE] #${server} -> ${found._id}, scan ${latest.createdAt.toISOString()}`);
-    const scan = await api.fetchScan(latest.url);
-    console.log(`[SCRAPE] #${server}: ${scan.length} players (${latest.url.split('/').pop()})`);
+  console.log(`[SCRAPE] #${server} -> ${found._id}, scan ${latest.createdAt.toISOString()}`);
+  const scan = await api.fetchScan(latest.url);
+  console.log(`[SCRAPE] #${server}: ${scan.length} players (${latest.url.split('/').pop()})`);
 
-    return {
-      scan,
-      createdAt: latest.createdAt,
-      serverId: found._id,
-      serverUrl: `https://dragonstats.com/dashboard/${found._id}`,
-    };
-  });
+  return {
+    scan,
+    createdAt: latest.createdAt,
+    serverId: found._id,
+    serverUrl: `https://dragonstats.com/dashboard/${found._id}`,
+  };
 }
 
 async function scrapeServer(server, args, scanIndex, store) {
@@ -277,7 +276,11 @@ async function scrapeServer(server, args, scanIndex, store) {
   const players = await pool([...built.players.values()], args.concurrency, async (player) => {
     const key = `${PLAYERS}/${player.id}.json`;
     const existing = existingById.get(player.id) ?? (await store.get(key));
-    return { key, value: mergeFile('player', existing, carryForward(existing, player, date)) };
+    const value = mergeFile('player', existing, carryForward(existing, player, date));
+    // Keep the in-memory copy truthful: the leadership summary builder reads
+    // from it after the writes instead of re-fetching every file.
+    existingById.set(player.id, value);
+    return { key, value };
   });
 
   const alliances = await pool([...built.alliances], args.concurrency, async (alliance) => {
@@ -343,6 +346,23 @@ async function scrapeServer(server, args, scanIndex, store) {
     date,
     serverUrl: collected.serverUrl,
   });
+
+  // One small file per window, written next to the data it summarises: the
+  // leadership page reads this instead of downloading every player's history
+  // file (~86MB on #973), which was its entire cold-start cost. Written before
+  // index.json so the "index last" invariant still holds - a missing summary
+  // only means the web falls back to the full read.
+  const summary = await buildLeadershipSummary(store, date, { files: existingById });
+  if (summary) {
+    const size = await store.put(`leadership/${date}.json`, summary, {
+      cacheControl: 'public, max-age=3600',
+    });
+    bytes += size;
+    console.log(
+      `[SCRAPE] wrote leadership/${date}.json · ${describe(size)} · ${summary.players.length} players`,
+    );
+  }
+
   bytes += await store.put('index.json', index, { cacheControl: 'public, max-age=60' });
 
   console.log(

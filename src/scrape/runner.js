@@ -24,23 +24,19 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
 const MAX_LOG_LINES = 2000;
 const MAX_STEP_LINES = 600;
-const LOGIN_TIMEOUT_MINUTES = 10;
-
 const SCRIPTS = {
   dragon: path.join(ROOT, 'scripts', 'scrape.js'),
   enrich: path.join(ROOT, 'scripts', 'enrich.js'),
   callofstats: path.join(ROOT, 'scripts', 'callofstats-scrape.js'),
-  login: path.join(ROOT, 'scripts', 'dragon-login.js'),
 };
 
 const STEP_LABELS = {
   dragon: 'DragonStats scrape',
   enrich: 'CallofStats enrichment',
   callofstats: 'CallofStats full scrape',
-  login: 'DragonStats sign-in',
 };
 
-const KINDS = ['dragon', 'enrich', 'callofstats', 'login'];
+const KINDS = ['dragon', 'enrich', 'callofstats'];
 const MODES = ['latest', 'date', 'scan-index'];
 
 let job = null;
@@ -84,18 +80,17 @@ function normalizeJob(input = {}) {
   if (!KINDS.includes(kind)) throw invalid(`Unknown scrape type "${kind}".`);
 
   const server = text(input.server, '973').replace(/^#/, '');
-  if (kind !== 'login' && !/^\d{1,7}$/.test(server)) {
+  if (!/^\d{1,7}$/.test(server)) {
     throw invalid('Server must be a number, for example 973.');
   }
 
   const spec = {
     kind,
-    server: kind === 'login' ? null : server,
+    server,
     mode: null,
     date: null,
     scanIndex: 0,
     concurrency: 1,
-    relogin: input.relogin !== false,
     enrichAfter: false,
     label: STEP_LABELS[kind],
     phase: 'scraping',
@@ -145,12 +140,6 @@ function normalizeJob(input = {}) {
     spec.label = 'CallofStats full scrape';
   }
 
-  if (kind === 'login') {
-    spec.args = [`--timeout=${LOGIN_TIMEOUT_MINUTES}`];
-    spec.label = 'DragonStats sign-in';
-    spec.phase = 'login';
-  }
-
   return spec;
 }
 
@@ -181,11 +170,14 @@ function getScrapeState({ after = 0, limit = 500 } = {}) {
 /**
  * Whether the host has a display a browser window can open on.
  *
- * Windows and macOS are desktops. On Linux, DISPLAY or WAYLAND_DISPLAY is
- * trusted (a container may run Xvfb deliberately), with the X socket checked
- * so a stale variable does not start a browser that cannot connect. Set
- * DRAGONSTATS_INTERACTIVE_LOGIN=0 on a server whose virtual display nobody is
- * watching, so the job fails with an explanation instead of waiting.
+ * DragonStats mints its browser gate from a real, headed window (Arcjet
+ * refuses headless browsers and plain HTTP clients), so a scrape on a server
+ * needs a display: Windows and macOS are desktops, and on Linux DISPLAY or
+ * WAYLAND_DISPLAY is trusted (a container may run Xvfb deliberately), with
+ * the X socket checked so a stale variable does not start a browser that
+ * cannot connect. Set DRAGONSTATS_INTERACTIVE_LOGIN=0 on a host whose virtual
+ * display nobody is watching, so the job fails with an explanation instead of
+ * waiting.
  */
 function canOpenWindow() {
   if (process.platform === 'win32' || process.platform === 'darwin') return true;
@@ -197,42 +189,6 @@ function canOpenWindow() {
   const match = /^:(\d+)/.exec(display);
   if (!match) return true;
   return fs.existsSync(`/tmp/.X11-unix/X${match[1]}`);
-}
-
-/** Whether the saved DragonStats storage state carries a usable Convex JWT. */
-function dragonSessionStatus() {
-  let state = null;
-  let base = 'https://dragonstats.com';
-  try {
-    const session = require('../dragon/session');
-    base = session.BASE;
-    state = session.loadSession();
-  } catch {
-    state = null;
-  }
-
-  const origin = (state?.origins || []).find((entry) => String(entry.origin).startsWith(base));
-  const token = (origin?.localStorage || []).find((item) =>
-    String(item.name).startsWith('__convexAuthJWT'),
-  );
-  if (!token?.value) {
-    return { hasSession: Boolean(state), valid: false, expiresAt: null, secondsLeft: null };
-  }
-
-  try {
-    const payload = JSON.parse(
-      Buffer.from(String(token.value).split('.')[1], 'base64url').toString('utf8'),
-    );
-    const secondsLeft = Number(payload.exp) - Math.floor(Date.now() / 1000);
-    return {
-      hasSession: true,
-      valid: Number.isFinite(secondsLeft) && secondsLeft > 120,
-      expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
-      secondsLeft: Number.isFinite(secondsLeft) ? secondsLeft : null,
-    };
-  } catch {
-    return { hasSession: true, valid: false, expiresAt: null, secondsLeft: null };
-  }
 }
 
 function gateStatus() {
@@ -277,7 +233,7 @@ async function getScrapeOptions() {
     server: '973',
     dates,
     latest,
-    dragon: { ...dragonSessionStatus(), gate: gateStatus() },
+    dragon: { gate: gateStatus() },
     callofstats: { accounts },
     canOpenWindow: canOpenWindow(),
     platform: process.platform,
@@ -383,27 +339,6 @@ function runStep(key, args, phase) {
   });
 }
 
-/** Phrases that only appear when DragonStats refused the saved session. */
-function looksLikeExpiredSession() {
-  const text = stepLines.join('\n');
-  if (
-    /did not issue a browser session|No DragonStats session|NO_SESSION|Unauthorized|not authenticated|dragon:login/i.test(
-      text,
-    )
-  ) {
-    return true;
-  }
-
-  // Convex masks auth failures as "Server Error", which is also what a changed
-  // query looks like. Only treat it as a session problem when the JWT is gone
-  // or about to expire, so a schema change cannot open a login window.
-  const status = dragonSessionStatus();
-  return (
-    /CONVEX .*Server Error/i.test(text) &&
-    (!status.valid || status.secondsLeft === null)
-  );
-}
-
 function finish(result) {
   const label = job.label;
   const phase = cancelled ? 'cancelled' : result.ok ? 'complete' : 'failed';
@@ -433,60 +368,20 @@ function fail(error) {
   addLog('stderr', `[scrape] ${error.message}`);
 }
 
-async function signIn() {
-  if (!canOpenWindow()) {
-    throw new Error(
-      'DragonStats sign-in needs a browser window on the bot host, but no display is available. ' +
-        'Run the scrape from a machine with a desktop, or give this host a display (Xvfb/VNC).',
-    );
-  }
-  addLog(
-    'meta',
-    '[scrape] Opening the DragonStats Google sign-in window on the bot host. ' +
-      'If you cannot see it, cancel and run the scrape from a desktop.',
-  );
-  return runStep('login', [`--timeout=${LOGIN_TIMEOUT_MINUTES}`], 'login');
-}
-
 async function run(spec) {
   try {
+    // The gate token is minted from a real browser window (Arcjet refuses
+    // headless), so an expired gate on a host without a display is the one
+    // thing this job cannot fix by itself.
     if (spec.kind === 'dragon' && !canOpenWindow() && !gateStatus().valid) {
       throw new Error(
-        'The DragonStats browser gate token has expired and the bot host has no display to mint a new one. ' +
-          'Run the scrape on a machine with a desktop, or run npm run scrape locally.',
+        'The DragonStats browser gate has expired and this host has no display to mint a new one. ' +
+          'The gate needs a real, headed window: run under Xvfb (DISPLAY=:99), or scrape from a desktop. ' +
+          'No login is involved - DragonStats reads work without an account.',
       );
     }
 
-    if (spec.kind === 'dragon' && spec.relogin) {
-      const status = dragonSessionStatus();
-      if (!status.valid) {
-        addLog(
-          'meta',
-          `[scrape] DragonStats session is ${status.hasSession ? 'expired' : 'missing'}; signing in first.`,
-        );
-        const signed = await signIn();
-        if (!signed.ok) {
-          throw new Error(
-            'DragonStats sign-in did not complete, so the scrape was not started. ' +
-              'Finish the Google sign-in in the window and try again.',
-          );
-        }
-      }
-    }
-
     let result = await runStep(spec.kind, spec.args, spec.phase);
-
-    if (
-      !result.ok &&
-      spec.kind === 'dragon' &&
-      spec.relogin &&
-      !cancelled &&
-      looksLikeExpiredSession()
-    ) {
-      addLog('meta', '[scrape] The saved session looks rejected; signing in and retrying once.');
-      const signed = await signIn();
-      if (signed.ok) result = await runStep(spec.kind, spec.args, spec.phase);
-    }
 
     if (result.ok && spec.enrichAfter && !cancelled) {
       const args = ['--server', spec.server, '--concurrency', '1'];
@@ -524,7 +419,6 @@ function startScrape(input) {
       date: spec.date,
       scanIndex: spec.scanIndex,
       concurrency: spec.concurrency,
-      relogin: spec.relogin,
       enrichAfter: spec.enrichAfter,
     },
     steps: [],
@@ -553,6 +447,5 @@ module.exports = {
   cancelScrape,
   getScrapeState,
   getScrapeOptions,
-  dragonSessionStatus,
   canOpenWindow,
 };

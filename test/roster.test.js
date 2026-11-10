@@ -1202,7 +1202,8 @@ async function main() {
         normalizeJob({ kind: 'callofstats', server: '973', concurrency: 9 }).args,
         ['--server', '973', '--concurrency', '5'],
       );
-      assert.deepStrictEqual(normalizeJob({ kind: 'login' }).args, ['--timeout=10']);
+      // The DragonStats login flow is gone: reads work without an account.
+      assert.throws(() => normalizeJob({ kind: 'login' }), /Unknown scrape type/);
     });
 
     check('invalid scrape requests are rejected before anything spawns', () => {

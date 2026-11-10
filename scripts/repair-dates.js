@@ -29,6 +29,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
 const { allianceResolver } = require('../src/dragon/resolve');
+const { buildLeadershipSummary } = require('../src/roster/leadership');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 const { carryForward } = require('../src/roster/carry');
@@ -322,6 +323,9 @@ async function repairDate(server, date, args, store, scansByDate) {
   for (const item of [...merges, ...strips, ...news]) {
     if (!item) continue;
     await store.put(item.key, item.value, { cacheControl: 'public, max-age=3600' });
+    // Keep the in-memory copy truthful: the leadership summary builder below
+    // reads from it instead of re-fetching every repaired file.
+    existingById.set(path.basename(item.key, '.json'), item.value);
     written += 1;
     if (item.mode === 'strip') stripped += 1;
   }
@@ -376,6 +380,19 @@ async function repairDate(server, date, args, store, scansByDate) {
   const carriedNote = carried < built.players.size
     ? `, ${built.players.size - carried} unallied`
     : '';
+
+  // Refresh this day's leadership summary so the web's fast path picks up the
+  // repaired numbers (a missing summary only costs the slow read, but a stale
+  // one would serve the old, wrong window).
+  let summaryWritten = false;
+  const summary = await buildLeadershipSummary(store, date, { files: existingById });
+  if (summary) {
+    await store.put(`leadership/${date}.json`, summary, {
+      cacheControl: 'public, max-age=3600',
+    });
+    summaryWritten = true;
+  }
+
   return {
     date,
     players: built.snapshot.players.length,
@@ -384,6 +401,7 @@ async function repairDate(server, date, args, store, scansByDate) {
     stripped,
     carried,
     bytes: snapshotBytes + allianceBytes,
+    summary: summaryWritten,
     note: carriedNote,
   };
 }

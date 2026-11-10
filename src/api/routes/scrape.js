@@ -6,7 +6,6 @@ const {
   getScrapeState,
   getScrapeOptions,
 } = require('../../scrape/runner');
-const dragonSession = require('../../dragon/session');
 
 /**
  * Scraping controls for the web dashboard.
@@ -32,24 +31,6 @@ function scrapeRouter() {
       res.json(await getScrapeOptions());
     } catch (error) {
       next(error);
-    }
-  });
-
-  /**
-   * Import a DragonStats storage state captured on a desktop.
-   *
-   * The body is the contents of `data/dragonstats-session.json`. It is written
-   * straight to disk and never echoed or logged.
-   */
-  router.post('/session', requireAccessCode, (req, res) => {
-    if (getScrapeState().job?.running) {
-      return res.status(409).json({ error: 'Wait for the running scrape to finish first.' });
-    }
-    try {
-      const imported = dragonSession.importSession(req.body);
-      return res.json({ ok: true, session: imported });
-    } catch (error) {
-      return res.status(400).json({ error: error.message });
     }
   });
 
