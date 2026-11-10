@@ -170,14 +170,10 @@ function getScrapeState({ after = 0, limit = 500 } = {}) {
 /**
  * Whether the host has a display a browser window can open on.
  *
- * DragonStats mints its browser gate from a real, headed window (Arcjet
- * refuses headless browsers and plain HTTP clients), so a scrape on a server
- * needs a display: Windows and macOS are desktops, and on Linux DISPLAY or
+ * Informational only: the DragonStats gate mints headless, so scrapes do not
+ * need this. Windows and macOS are desktops; on Linux DISPLAY or
  * WAYLAND_DISPLAY is trusted (a container may run Xvfb deliberately), with
- * the X socket checked so a stale variable does not start a browser that
- * cannot connect. Set DRAGONSTATS_INTERACTIVE_LOGIN=0 on a host whose virtual
- * display nobody is watching, so the job fails with an explanation instead of
- * waiting.
+ * the X socket checked so a stale variable does not point at a dead display.
  */
 function canOpenWindow() {
   if (process.platform === 'win32' || process.platform === 'darwin') return true;
@@ -370,17 +366,9 @@ function fail(error) {
 
 async function run(spec) {
   try {
-    // The gate token is minted from a real browser window (Arcjet refuses
-    // headless), so an expired gate on a host without a display is the one
-    // thing this job cannot fix by itself.
-    if (spec.kind === 'dragon' && !canOpenWindow() && !gateStatus().valid) {
-      throw new Error(
-        'The DragonStats browser gate has expired and this host has no display to mint a new one. ' +
-          'The gate needs a real, headed window: run under Xvfb (DISPLAY=:99), or scrape from a desktop. ' +
-          'No login is involved - DragonStats reads work without an account.',
-      );
-    }
-
+    // No pre-flight display check any more: the gate mints headless (the UA
+    // fix in dragon/session.js), so a server without a display can scrape.
+    // A mint that still fails surfaces as the child's own error below.
     let result = await runStep(spec.kind, spec.args, spec.phase);
 
     if (result.ok && spec.enrichAfter && !cancelled) {

@@ -41,45 +41,61 @@ function usable(gate) {
 }
 
 /**
- * Mints a gate token from a real, headed browser window.
+ * Mints a gate token from a browser - headless first (works on servers with
+ * no display), then a real window as the fallback.
  *
- * The stealth launch options (see session.withPage) matter: Arcjet refuses
- * Chromium that announces itself as automated - and refuses headless
- * outright - which is why a plain fetch, or a raw Playwright launch, gets 403
- * while this gets 200. No cookies, no profile and no login are involved: a
- * fresh guest browser is enough.
+ * The stealth launch options (see session.withPage) and the headless UA
+ * without the HeadlessChrome token are what get past Arcjet: a plain fetch,
+ * a default-UA headless browser, and an announcing headless browser all get
+ * 403, while the fixed headless browser mints fine. No cookies, no profile
+ * and no login are involved: a fresh guest browser is enough.
  */
 async function mintGate() {
   const { withPage, BASE: DASHBOARD_BASE } = require('./session');
 
-  const bag = await withPage(
-    async (page) => {
-      await page.goto(`${DASHBOARD_BASE}/dashboard`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      return page.evaluate(async () => {
-        try {
-          const res = await fetch('/api/browser-session', { method: 'POST' });
-          const text = await res.text();
+  const attempt = async (headless) => {
+    const bag = await withPage(
+      async (page) => {
+        await page.goto(`${DASHBOARD_BASE}/dashboard`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        return page.evaluate(async () => {
           try {
-            const body = JSON.parse(text);
-            return { status: res.status, token: body.token || null, expiresAt: body.expiresAt || null };
-          } catch {
-            return { status: res.status, token: null, expiresAt: null };
+            const res = await fetch('/api/browser-session', { method: 'POST' });
+            const text = await res.text();
+            try {
+              const body = JSON.parse(text);
+              return { status: res.status, token: body.token || null, expiresAt: body.expiresAt || null };
+            } catch {
+              return { status: res.status, token: null, expiresAt: null };
+            }
+          } catch (err) {
+            return { status: 0, token: null, expiresAt: null, error: String(err) };
           }
-        } catch (err) {
-          return { status: 0, token: null, expiresAt: null, error: String(err) };
-        }
-      });
-    },
-    { headless: false },
-  );
-
-  if (!bag.token) {
-    throw new Error(
-      bag.status === 403
-        ? 'DragonStats refused the browser gate (HTTP 403). Its bot detection only accepts a real, ' +
-            'headed window - run this from a desktop, or under Xvfb on a server.'
-        : `DragonStats did not issue a browser gate (HTTP ${bag.status}).`,
+        });
+      },
+      { headless },
     );
+    if (!bag.token) {
+      throw new Error(
+        bag.status === 403 ? 'refused the gate (HTTP 403)' : `no gate (HTTP ${bag.status})`,
+      );
+    }
+    return bag;
+  };
+
+  let bag;
+  try {
+    bag = await attempt(true);
+  } catch (headlessError) {
+    // Headless refused (or the browser would not start): try a real window
+    // before giving up - on a desktop this is the path that always worked.
+    try {
+      bag = await attempt(false);
+    } catch (windowError) {
+      throw new Error(
+        `DragonStats did not issue a browser gate. Headless: ${headlessError.message}; ` +
+          `windowed: ${windowError.message}.`,
+      );
+    }
   }
 
   const gate = {
