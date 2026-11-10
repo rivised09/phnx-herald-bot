@@ -69,6 +69,29 @@ function cleanHeadlessUserAgent(browser) {
 }
 
 /**
+ * Launches Chromium with the sandbox decision applied, retrying without the
+ * sandbox when this host still refuses it (missing SUID helper, hardened
+ * container): Chromium's own advice in that case is `--no-sandbox`, and a
+ * browser that cannot start helps nobody. The gate fetches one public page,
+ * so running sandbox-free here is an accepted trade.
+ */
+async function launchBrowser(pw, headless) {
+  const options = {
+    headless,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--no-default-browser-check'],
+  };
+  try {
+    return await pw.chromium.launch({ ...options, chromiumSandbox: sandboxEnabled() });
+  } catch (err) {
+    if (/sandbox/i.test(String(err?.message || ''))) {
+      return await pw.chromium.launch({ ...options, chromiumSandbox: false });
+    }
+    throw err;
+  }
+}
+
+/**
  * Runs `work(page)` in a real browser window and closes it afterwards.
  *
  * Headless is the default and works for the gate (see the UA note above), so
@@ -77,12 +100,7 @@ function cleanHeadlessUserAgent(browser) {
  */
 async function withPage(work, { headless = true } = {}) {
   const pw = requirePlaywright();
-  const browser = await pw.chromium.launch({
-    headless,
-    chromiumSandbox: sandboxEnabled(),
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--no-default-browser-check'],
-  });
+  const browser = await launchBrowser(pw, headless);
   try {
     const context = await browser.newContext({
       viewport: { width: 1600, height: 1000 },
