@@ -3,10 +3,14 @@
  *
  *   npm run scrape -- --server 973
  *   npm run scrape -- --server 973,1014
- *   npm run scrape -- --server 973 --date 2026-10-26
+ *   npm run scrape -- --server 973 --scan-date 2026-10-26    that day's own scan
  *   npm run scrape -- --server 973 --out ./.export       write to a directory
  *   npm run scrape -- --server 973 --scan data/scan.json  reuse a saved scan
  *   npm run scrape -- --server 973 --dry-run              fetch and build, write nothing
+ *
+ * `--date YYYY-MM-DD` stamps the fetched scan as that date; it refuses to
+ * publish a scan under a day other than its own, so a backfill can no longer
+ * overwrite history with the newest scan (use `--scan-date` for that).
  *
  * The scrape itself is two steps: the newest scan for the server is fetched
  * from DragonStats' public R2, then it is mapped onto the shape the site
@@ -23,6 +27,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
+const { allianceResolver } = require('../src/dragon/resolve');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
 const { carryForward } = require('../src/roster/carry');
@@ -201,11 +206,53 @@ async function scrapeServer(server, args, scanIndex, store) {
   const collected = await collect(server, args, scanIndex);
   const date = args.date || args.scanDate || collected.createdAt.toISOString().slice(0, 10);
 
+  // A scan may only ever be published under the day it was taken. `--date`
+  // with the default scan index grabs the *newest* scan, so backfilling a
+  // missing day with it used to stamp today's data onto that day: nine dates
+  // (2026-10-25, 10-31, 11-01..11-06, 11-09) ended up holding another day's
+  // numbers, which made every window delta read 0. Refuse the mismatch and
+  // point at the flag that fetches the day's own scan.
+  const scanDay = collected.createdAt.toISOString().slice(0, 10);
+  if (args.scan) {
+    if (args.date && args.date !== scanDay) {
+      console.warn(
+        `[SCRAPE] --scan reuses a saved file; its date is unknown, filing it as ${args.date}.`,
+      );
+    }
+  } else if (args.date && !args.scanDate && scanDay !== date) {
+    throw new Error(
+      `The newest DragonStats scan is from ${scanDay}, not ${date}. ` +
+        `Publishing it as ${date} would overwrite that day's own data. ` +
+        `Use --scan-date ${date} to fetch ${date}'s scan, or --scan-index N for an older one.`,
+    );
+  }
+
   const existingIndex = await store.get('index.json');
   const existingLatest = existingIndex?.latest
     ? await store.get(`snapshots/${existingIndex.latest}.json`)
     : null;
-  const existingAlliances = allianceIdsFrom(existingLatest);
+  // The date's own snapshot carries the ids its alliances were published
+  // under; the newest snapshot carries the ids in use today. Both are the
+  // same ids in practice, and taking either keeps alliance pages stable.
+  const existingAlliances = {
+    ...allianceIdsFrom(await store.get(`snapshots/${date}.json`)),
+    ...allianceIdsFrom(existingLatest),
+  };
+
+  // DragonStats reports no alliance for some players (empty string, no title
+  // either). Before a day is built, load those players' own histories so the
+  // resolver can file them under the last alliance we recorded instead of
+  // marking them "Not In An Alliance".
+  const scanIds = [
+    ...new Set(
+      collected.scan.map((record) => String(record.id || '').trim()).filter(Boolean),
+    ),
+  ];
+  const existingById = new Map();
+  await pool(scanIds, args.concurrency, async (id) => {
+    const file = await store.get(`${PLAYERS}/${id}.json`);
+    if (file) existingById.set(id, file);
+  });
 
   const built = map.fromScan(collected.scan, {
     server,
@@ -213,6 +260,7 @@ async function scrapeServer(server, args, scanIndex, store) {
     existingAlliances,
     crawledAt: collected.createdAt,
     serverUrl: collected.serverUrl,
+    resolveAlliance: allianceResolver(existingById, date),
   });
 
   console.log(
@@ -228,7 +276,7 @@ async function scrapeServer(server, args, scanIndex, store) {
 
   const players = await pool([...built.players.values()], args.concurrency, async (player) => {
     const key = `${PLAYERS}/${player.id}.json`;
-    const existing = await store.get(key);
+    const existing = existingById.get(player.id) ?? (await store.get(key));
     return { key, value: mergeFile('player', existing, carryForward(existing, player, date)) };
   });
 

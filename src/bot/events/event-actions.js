@@ -1,6 +1,6 @@
 const prisma = require('../../db');
 const { CONFIG } = require('../../config');
-const { updateEventMessage, deleteEventMessage, deleteReminderMessage, sendNotification } = require('./posting');
+const { updateEventMessage, deleteEventMessage, deleteReminderMessage, markReminderCancelled, sendNotification } = require('./posting');
 const { deleteScheduledEvent, mapEntityType } = require('./scheduled');
 
 async function rearmPingWindows(eventId, startTime) {
@@ -68,10 +68,13 @@ async function syncEventUpdate(client, updated, { notifyModified = true, previou
 }
 
 async function cancelEventDiscord(client, updated) {
+  // The reminder is restyled into a red ❌ cancelled card rather than
+  // deleted: the members who were pinged about it see why it is off, in the
+  // same design language as the web calendar's cancelled badge.
   try {
-    await deleteReminderMessage(client, updated.reminderMessageId);
+    await markReminderCancelled(client, updated);
   } catch (err) {
-    console.error('[EVENT-ACTIONS] Failed to delete reminder message:', err.message);
+    console.error('[EVENT-ACTIONS] Failed to mark reminder as cancelled:', err.message);
   }
 
   try {

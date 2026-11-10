@@ -433,19 +433,41 @@ function sectionsFor(player) {
  * `existingAlliances` maps a name to the id already published for it, so a day
  * scraped from DragonStats links to the same alliance page as the days scraped
  * from callofstats instead of creating a second one.
+ *
+ * `resolveAlliance(id)` is the answer to DragonStats leaving `alliance` empty
+ * for players it has no alliance record for (60+ lords on #973, including the
+ * strongest one). An empty field means "unknown", not "left the alliance", so
+ * the caller can supply the last alliance we recorded for that player on an
+ * earlier date and the day is filed under it instead of under the synthetic
+ * "Not In An Alliance" bucket.
  */
-function fromScan(scan, { server, date, existingAlliances = {}, crawledAt = null, serverUrl = null } = {}) {
+function fromScan(scan, {
+  server,
+  date,
+  existingAlliances = {},
+  crawledAt = null,
+  serverUrl = null,
+  resolveAlliance = null,
+} = {}) {
   if (!Array.isArray(scan) || !scan.length) throw new Error('The scan is empty.');
 
   const players = [];
   const byAlliance = new Map();
+
+  /** The alliance this player belongs to on this day. */
+  const allianceOf = (id, raw) => {
+    const stated = String(raw || '').trim();
+    if (stated) return stated;
+    const carried = resolveAlliance ? String(resolveAlliance(id) || '').trim() : '';
+    return carried || UNAFFILIATED_NAME;
+  };
 
   for (const record of scan) {
     const id = String(record.id || '').trim();
     if (!id) continue;
     const name = String(record.name || '').trim();
     const power = num(record.power);
-    const alliance = String(record.alliance || '').trim() || UNAFFILIATED_NAME;
+    const alliance = allianceOf(id, record.alliance);
 
     players.push({
       id,
@@ -503,7 +525,7 @@ function fromScan(scan, { server, date, existingAlliances = {}, crawledAt = null
           rank: num(record.rank),
           power: num(record.power),
           avatar: null,
-          alliance: String(record.alliance || '').trim() || UNAFFILIATED_NAME,
+          alliance: allianceOf(id, record.alliance),
           sections: sectionsFor(record),
           albums: [],
         },

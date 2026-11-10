@@ -75,16 +75,36 @@ async function deleteReminderMessage(client, messageId) {
   return true;
 }
 
-async function markReminderEnded(client, event) {
+/**
+ * Turns the reminder message into a finished-event card: the embed is
+ * rebuilt from the event's terminal state (emerald + ✅ for completed, red +
+ * ❌ for cancelled) instead of only prepending "EVENT ENDED" to the content,
+ * which left the card itself looking like it was still upcoming.
+ *
+ * The content line is replaced rather than extended - the old
+ * "@everyone ... starts in ..." text is stale once the event is over, and an
+ * edit never re-notifies the channel.
+ */
+async function editReminderState(client, event, { prefix, cancelled = false }) {
   if (!event.reminderMessageId) return null;
   const channel = await getRemindersChannel(client);
   if (!channel) return null;
   const message = await channel.messages.fetch(event.reminderMessageId).catch(() => null);
   if (!message) return null;
-  const original = message.content || '';
-  const content = `**EVENT ENDED**\n${original}`.trim();
-  await message.edit({ content });
+  const embed = buildEventEmbed(event, { cancelled });
+  await message.edit({ content: prefix, embeds: [embed] });
   return true;
+}
+
+async function markReminderEnded(client, event) {
+  return editReminderState(client, event, { prefix: '✅ **EVENT ENDED**' });
+}
+
+async function markReminderCancelled(client, event) {
+  return editReminderState(client, event, {
+    prefix: '❌ **EVENT CANCELLED**',
+    cancelled: true,
+  });
 }
 
 async function sendNotification(client, event, content, { cancelled = false } = {}) {
@@ -97,7 +117,12 @@ async function sendNotification(client, event, content, { cancelled = false } = 
 
 async function sendPing(client, event, windowLabel) {
   const channel = (await getRemindersChannel(client)) || (await getEventsChannel(client));
-  if (!channel) return null;
+  // No channel is an error, not a silent no-op: returning null here used to
+  // make the scheduler log "Sent ..." and mark the window as delivered while
+  // nothing was posted, so the real failure only showed up elsewhere.
+  if (!channel) {
+    throw new Error('no reminders or events channel available (missing channel or access)');
+  }
   const embed = buildEventEmbed(event);
   let content;
   if (windowLabel === 'starting' || windowLabel === 'started') {
@@ -117,6 +142,7 @@ module.exports = {
   deleteEventMessage,
   deleteReminderMessage,
   markReminderEnded,
+  markReminderCancelled,
   sendNotification,
   sendPing,
 };

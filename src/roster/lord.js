@@ -126,6 +126,7 @@ function createLordSource({ tag = 'LORD', stripe = 0, date = null } = {}) {
 
     const rows = (await page.evaluate(extract.readStatSections)) || [];
     const nameHistory = (await page.evaluate(extract.readNameHistory)) || [];
+    const serverHistory = (await page.evaluate(extract.readServerHistory)) || [];
     const avatar = await page.evaluate(extract.readAvatar);
     const albums = (await page.evaluate(extract.readAlbums)) || [];
     const date = await page.evaluate(extract.readPageDate);
@@ -145,7 +146,18 @@ function createLordSource({ tag = 'LORD', stripe = 0, date = null } = {}) {
     // Playstyle rows carry their own section ('Playstyle') and must not be
     // flattened into stats, which is keyed by label only. Return them
     // separately so the caller can write them under their own section.
-    return { stats, nameHistory, avatar, albums, date, title, playstyle, alliance, achievements };
+    return {
+      stats,
+      nameHistory,
+      serverHistory,
+      avatar,
+      albums,
+      date,
+      title,
+      playstyle,
+      alliance,
+      achievements,
+    };
   }
 
   async function close() {

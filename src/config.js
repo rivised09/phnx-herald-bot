@@ -85,6 +85,10 @@ const CONFIG = {
     FOOTER: 'Phoenix of War - Server 973',
   },
   BEHAVIOR: {
+    // PING_SCHEDULER_ENABLED=false turns this instance's reminder scheduler
+    // off entirely (a local dev bot must never race the deployed one for the
+    // same windows). Anything but the exact string "false" leaves it on.
+    PING_SCHEDULER_ENABLED: process.env.PING_SCHEDULER_ENABLED !== 'false',
     PING_WINDOWS: [
       { label: '7 hours', key: 'pingSevenHours', msBefore: 7 * 60 * 60 * 1000 },
       { label: 'one hour', key: 'pingOneHour', msBefore: 60 * 60 * 1000 },
@@ -97,7 +101,9 @@ const CONFIG = {
       SCHEDULED: 0x5865f2,
       ACTIVE: 0x57f287,
       CANCELLED: 0xed4245,
-      COMPLETED: 0x99aab5,
+      // Emerald green to match the web calendar's Completed badge (was grey,
+      // which made a finished event look inactive rather than done).
+      COMPLETED: 0x10b981,
     },
     UNKNOWN_CLOCK_EMOJI: '🕒',
   },

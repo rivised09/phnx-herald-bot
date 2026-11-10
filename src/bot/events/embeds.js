@@ -31,6 +31,21 @@ function buildEventEmbed(event, { cancelled = false, pingNote = null } = {}) {
 
   const fields = [];
 
+  // Terminal states get an unmissable status line first - the same
+  // green-check / red-cross language the web calendar cards use, so a card
+  // that was built while the event was still running reads correctly after
+  // the fact (the reminder edit relies on this).
+  if (effectiveStatus === 'COMPLETED') {
+    fields.push({
+      name: 'Status',
+      value: event.endTime
+        ? `✅ **Completed** · ended ${formatDiscordDateTime(event.endTime)}`
+        : '✅ **Completed**',
+    });
+  } else if (effectiveStatus === 'CANCELLED') {
+    fields.push({ name: 'Status', value: '❌ **Cancelled**' });
+  }
+
   fields.push({
     name: 'Scheduled for',
     value: [

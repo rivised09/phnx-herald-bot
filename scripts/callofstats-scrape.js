@@ -10,18 +10,24 @@
  *   npm run callofstats:scrape -- --server 973 --alliance 12345       one alliance, all dates, then stop
  *   npm run callofstats:scrape -- --server 973 --from 2026-08-01       from a date back to oldest
  *   npm run callofstats:scrape -- --server 973 --date 2026-11-04       enrich one date only
+ *   npm run callofstats:scrape -- --server 973 --by-date               date first, then every player
+ *   npm run callofstats:scrape:date -- --server 973                    latest date, first player to last
  *   npm run callofstats:scrape -- --server 973 --wait 30               wait 30m between blocked passes
  *
  * Without --player/--alliance the run walks every player and every alliance one
- * at a time. For each player it fetches every known date (plus today) from
- * latest to oldest, then moves to the next. For each alliance it fetches every
- * known date (plus today) from latest to oldest, then moves to the next.
+ * at a time. By default the order is player first: for each player it fetches
+ * every known date (plus today) from latest to oldest, then moves to the next
+ * player. With --by-date the order flips to the original date-first method: for
+ * each date (latest to oldest) it fetches every player from first to last,
+ * then moves to the next date.
  * With --player <id> it fetches only that one player, all dates, then stops.
  * With --alliance <id> it fetches only that one alliance, all dates, then stops.
  * With --from YYYY-MM-DD it only fetches dates on or before that date,
  * going backward to the oldest available date.
  * With --date YYYY-MM-DD it fetches only that one date (enrich mode),
  * skipping dates that already have CallOfStats avatar + albums unless --force.
+ * With --date latest it uses today's target date.
+ * `npm run callofstats:scrape:date` is the same as `--by-date --date latest`.
  *
  * The source gives an account a small page budget before it starts answering
  * every data page with a redirect. A run that hits that wall leaves the pairs
@@ -73,6 +79,7 @@ function parseArgs(argv) {
     alliance: null,
     from: null,
     date: null,
+    byDate: false,
     out: null,
     dryRun: false,
     force: false,
@@ -87,22 +94,27 @@ function parseArgs(argv) {
     else if (arg === '--alliance') args.alliance = argv[++i];
     else if (arg === '--from') args.from = argv[++i];
     else if (arg === '--date') args.date = argv[++i];
+    else if (arg === '--by-date') args.byDate = true;
     else if (arg === '--out') args.out = argv[++i];
     else if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--force') args.force = true;
     else if (arg === '--wait') args.waitMinutes = Math.max(0, Number(argv[++i]) || 0);
     else if (arg === '--help' || arg === '-h') {
       console.log(
-        'usage: npm run callofstats:scrape -- --server 973 [--concurrency N] [--stripe N] [--player <id>] [--alliance <id>] [--from YYYY-MM-DD] [--date YYYY-MM-DD] [--out <dir>] [--dry-run] [--force] [--wait <minutes>]',
+        'usage: npm run callofstats:scrape -- --server 973 [--concurrency N] [--stripe N] [--player <id>] [--alliance <id>] [--from YYYY-MM-DD] [--date YYYY-MM-DD|latest] [--by-date] [--out <dir>] [--dry-run] [--force] [--wait <minutes>]',
       );
       console.log('');
       console.log('Without --player/--alliance the run walks every player one at a time, fetching each');
       console.log('player\'s dates from latest to oldest before moving to the next player.');
+      console.log('With --by-date the order flips: every player for the latest date first, then');
+      console.log('every player for the next date, down to the oldest.');
       console.log('With --player <id> it fetches only that one player, all dates, then stops.');
       console.log('With --alliance <id> it fetches only that one alliance, all dates, then stops.');
       console.log('With --from YYYY-MM-DD it only fetches dates on or before that date,');
       console.log('going backward to the oldest available date.');
       console.log('With --date YYYY-MM-DD it fetches only that one date (enrich mode).');
+      console.log('With --date latest it uses today\'s date.');
+      console.log('npm run callofstats:scrape:date -- --server 973  =  --by-date --date latest');
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
@@ -188,11 +200,33 @@ function alreadyScraped(existing, date) {
   return Boolean(entry.avatar && Array.isArray(entry.albums) && entry.albums.length > 0);
 }
 
+/** Gallery likes are displayed as decorated text by the source; store a number. */
+function normalizeAlbums(albums) {
+  return (albums || [])
+    .filter((album) => album && album.url)
+    .map((album) => {
+      let likes = null;
+      if (typeof album.likes === 'number' && Number.isFinite(album.likes)) {
+        likes = album.likes;
+      } else {
+        const match = String(album.likes ?? '').replace(/,/g, '').match(/\d+(?:\.\d+)?/);
+        if (match) likes = Number(match[0]);
+      }
+      return {
+        url: album.url,
+        likes,
+        postedAt: album.postedAt || null,
+        caption: album.caption || null,
+      };
+    });
+}
+
 /**
  * Turns extracted lord-page data into a player file entry for one date.
  */
 function enrichPlayer(player, lordData, targetDate) {
   const date = targetDate || lordData.date || today();
+  player = player || {};
 
   const incoming = JSON.parse(JSON.stringify(player));
 
@@ -201,17 +235,19 @@ function enrichPlayer(player, lordData, targetDate) {
   if (lordData.nameHistory && lordData.nameHistory.length) {
     incoming.nameHistory = [...new Set([...(incoming.nameHistory || []), ...lordData.nameHistory])];
   }
-  if (lordData.albums && lordData.albums.length) {
-    incoming.albums = [...(incoming.albums || [])];
-    const existingUrls = new Set(incoming.albums.map((a) => a.url));
-    for (const album of lordData.albums) {
-      if (!existingUrls.has(album.url)) {
-        incoming.albums.push(album);
-        existingUrls.add(album.url);
-      }
-    }
-  }
 
+  // Previous servers come from the source's separate Server History box, not
+  // from the name history list. That box also lists the current server, which
+  // is dropped so it is not shown as a previous one.
+  const currentServer = String(lordData.stats?.Server ?? '').replace(/[^\d]/g, '');
+  const previousServers = (lordData.serverHistory || [])
+    .map((value) => String(value).trim())
+    .filter((value) => value && value !== currentServer);
+  if (previousServers.length) {
+    incoming.previousServers = [
+      ...new Set([...(incoming.previousServers || []), ...previousServers]),
+    ];
+  }
   incoming.dates = [...new Set([...(incoming.dates || []), date])].sort().reverse();
 
   const existingEntry = incoming.byDate && incoming.byDate[date];
@@ -222,6 +258,11 @@ function enrichPlayer(player, lordData, targetDate) {
     avatar: lordData.avatar || existingEntry?.avatar || null,
     alliance: lordData.alliance || existingEntry?.alliance || null,
     sections: [],
+    // The web gallery reads albums from this date entry, including their likes.
+    // An empty gallery stays empty so the web can use the nearest older date.
+    albums: Array.isArray(lordData.albums)
+      ? normalizeAlbums(lordData.albums)
+      : existingEntry?.albums || [],
     achievements: existingEntry?.achievements || [],
   };
 
@@ -442,7 +483,14 @@ async function processPlayers(source, store, work, dryRun, force = false) {
       const lordName = nameMatch ? nameMatch[1] : null;
 
       const enriched = enrichPlayer(existing, lordData, date);
-      if (lordName && !enriched.name) enriched.name = lordName;
+      if (lordName) {
+        // The top-level name is always the current one. Per-date names stay as
+        // recorded, except for a brand-new date entry that has none yet.
+        enriched.name = lordName;
+        if (enriched.byDate?.[date] && !enriched.byDate[date].name) {
+          enriched.byDate[date].name = lordName;
+        }
+      }
 
       const merged = mergeFile('player', existing, enriched);
 
@@ -633,7 +681,7 @@ async function main() {
   );
 
   const store = createStore({ dir: args.out });
-  const targetDate = today();
+  let targetDate = today();
   console.log(`[CALLSTATS] Target date: ${targetDate}`);
 
   // Build the player list. Prefer today's own roster: a player who migrated out
@@ -706,6 +754,32 @@ async function main() {
     );
   }
 
+  // CallOfStats publishes current data only: a `selected_date` it has not
+  // published yet answers 404, which makes every lord page look unreachable
+  // when the local calendar has rolled over before the source. Read the date
+  // the source itself reports and use that as "today" for a latest run.
+  if ((!args.date || args.date === 'latest' || args.date === 'today') && playerIds.length) {
+    const probe = createLordSource({ tag: 'CALLSTATS', stripe: args.stripe });
+    try {
+      for (const probeId of playerIds.slice(0, 3)) {
+        const page = await probe.fetch(probeId);
+        if (!page.ok) continue;
+        const data = await probe.read(page.html);
+        if (data && data.date && data.date !== targetDate) {
+          console.log(
+            `[CALLSTATS] Source's latest date is ${data.date} (local ${targetDate}); using ${data.date}.`,
+          );
+          targetDate = data.date;
+        }
+        break;
+      }
+    } catch (err) {
+      console.warn(`[CALLSTATS] Could not resolve the source's latest date: ${err.message}`);
+    } finally {
+      await probe.close();
+    }
+  }
+
   // Build the alliance list from the snapshot/API roster.
   let allianceIds;
   if (args.alliance) {
@@ -732,7 +806,11 @@ async function main() {
   // --from limits to dates on or before that date. Without either, all known
   // dates plus today are included.
   const fromDate = args.from;
-  const singleDate = args.date;
+  const requestedDate = args.date;
+  // `latest` is a convenience for the single-date run, so the command does not
+  // need to know today's date.
+  const singleDate =
+    requestedDate === 'latest' || requestedDate === 'today' ? targetDate : requestedDate;
   const allDates = new Set();
   if (singleDate) {
     allDates.add(singleDate);
@@ -761,31 +839,53 @@ async function main() {
       (singleDate ? ` (single date: ${singleDate})` : fromDate ? ` (from ${fromDate} backward)` : ''),
   );
 
-  // Build the (player, date) work list, newest date first for each player.
+  // Build the (player, date) work list. The default is player first (all of a
+  // player's dates, newest first); --by-date is the original date-first method
+  // (every player for the newest date, then the next date).
   // --force re-reads every pair; otherwise anything already written is skipped.
   const playerWork = [];
   if (!args.alliance) {
+    const existingByPlayer = new Map();
     for (const playerId of playerIds) {
-      const existing = await store.get(`players/${playerId}.json`).catch(() => null);
-      for (const date of dates) {
-        if (!args.force && alreadyScraped(existing, date)) continue;
-        playerWork.push({ playerId, date });
-      }
+      existingByPlayer.set(
+        playerId,
+        await store.get(`players/${playerId}.json`).catch(() => null),
+      );
     }
-    console.log(`[CALLSTATS] ${playerWork.length} (player, date) pairs to fetch.`);
+    const pairs = args.byDate
+      ? dates.flatMap((date) => playerIds.map((playerId) => ({ playerId, date })))
+      : playerIds.flatMap((playerId) => dates.map((date) => ({ playerId, date })));
+    for (const { playerId, date } of pairs) {
+      if (!args.force && alreadyScraped(existingByPlayer.get(playerId), date)) continue;
+      playerWork.push({ playerId, date });
+    }
+    console.log(
+      `[CALLSTATS] ${playerWork.length} (player, date) pairs to fetch ` +
+        `(${args.byDate ? 'date first, then player' : 'player first, then date'}).`,
+    );
   }
 
-  // Build the (alliance, date) work list, newest date first for each alliance.
+  // Build the (alliance, date) work list with the same ordering choice.
   const allianceWork = [];
   if (!args.player) {
+    const existingByAlliance = new Map();
     for (const allianceId of allianceIds) {
-      const existing = await store.get(`alliances/${allianceId}.json`).catch(() => null);
-      for (const date of dates) {
-        if (!args.force && alreadyScraped(existing, date)) continue;
-        allianceWork.push({ allianceId, date });
-      }
+      existingByAlliance.set(
+        allianceId,
+        await store.get(`alliances/${allianceId}.json`).catch(() => null),
+      );
     }
-    console.log(`[CALLSTATS] ${allianceWork.length} (alliance, date) pairs to fetch.`);
+    const pairs = args.byDate
+      ? dates.flatMap((date) => allianceIds.map((allianceId) => ({ allianceId, date })))
+      : allianceIds.flatMap((allianceId) => dates.map((date) => ({ allianceId, date })));
+    for (const { allianceId, date } of pairs) {
+      if (!args.force && alreadyScraped(existingByAlliance.get(allianceId), date)) continue;
+      allianceWork.push({ allianceId, date });
+    }
+    console.log(
+      `[CALLSTATS] ${allianceWork.length} (alliance, date) pairs to fetch ` +
+        `(${args.byDate ? 'date first, then alliance' : 'alliance first, then date'}).`,
+    );
   }
 
   const started = Date.now();

@@ -29,6 +29,15 @@ function sidecarEnabled() {
 }
 
 /**
+ * Sessions and the active-account index are bot-level settings, not roster
+ * rows: the roster Prisma schema has no Setting model. The main client owns the
+ * settings table, so both the app and the scrape scripts share it.
+ */
+function settingsDb() {
+  return require('../db');
+}
+
+/**
  * Whether the sidecar answers, checked once per process.
  *
  * A machine without Python must still be able to log in, so a sidecar that
@@ -113,7 +122,7 @@ async function loadAccountIndex() {
   if (accountIndexLoaded) return;
   accountIndexLoaded = true;
   try {
-    const prisma = require('./db');
+    const prisma = settingsDb();
     const row = await prisma.setting.findUnique({ where: { key: ACCOUNT_INDEX_KEY } });
     const parsed = parseInt(row?.value, 10);
     const count = accountCount();
@@ -125,7 +134,7 @@ async function loadAccountIndex() {
 
 async function saveAccountIndex() {
   try {
-    const prisma = require('./db');
+    const prisma = settingsDb();
     await prisma.setting.upsert({
       where: { key: ACCOUNT_INDEX_KEY },
       create: { key: ACCOUNT_INDEX_KEY, value: String(accountIndex) },
@@ -182,7 +191,7 @@ function readLocalSession() {
 
 async function loadSession() {
   try {
-    const prisma = require('./db');
+    const prisma = settingsDb();
     const row = await prisma.setting.findUnique({ where: { key: SESSION_KEY } });
     if (row?.value) {
       const parsed = JSON.parse(row.value);
@@ -212,7 +221,7 @@ async function persistSessionState(state) {
   }
 
   try {
-    const prisma = require('./db');
+    const prisma = settingsDb();
     const value = JSON.stringify(state);
     await prisma.setting.upsert({
       where: { key: SESSION_KEY },
@@ -263,7 +272,7 @@ function readLocalAccountSessions() {
 
 async function readAccountSessions() {
   try {
-    const prisma = require('./db');
+    const prisma = settingsDb();
     const row = await prisma.setting.findUnique({ where: { key: ACCOUNT_SESSIONS_KEY } });
     if (row?.value) {
       const parsed = JSON.parse(row.value);
@@ -283,7 +292,7 @@ async function writeAccountSessions(map) {
     console.warn('[ROSTER] Could not persist account sessions file:', err.message);
   }
   try {
-    const prisma = require('./db');
+    const prisma = settingsDb();
     const value = JSON.stringify(map);
     await prisma.setting.upsert({
       where: { key: ACCOUNT_SESSIONS_KEY },

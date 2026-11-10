@@ -120,6 +120,19 @@ function readNameHistory() {
     .filter(Boolean);
 }
 
+/** Previous servers of a player, from the source's separate Server History box. */
+function readServerHistory() {
+  const heading = [...document.querySelectorAll('h3.higher-label')].find((h) =>
+    /server history/i.test(h.textContent || ''),
+  );
+  if (!heading) return [];
+  const box = heading.closest('.history-dropdown') || heading.parentElement;
+  if (!box) return [];
+  return [...box.querySelectorAll('.history-item')]
+    .map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
 /**
  * The player's picture, absolute.
  *
@@ -372,8 +385,10 @@ module.exports = {
   readStatSections,
   readAchievements,
   readNameHistory,
+  readServerHistory,
   readAvatar,
   readPageDate,
+  readAlliance,
   readAlbums,
   readPlaystyle,
   readMemberIds,
