@@ -47,7 +47,11 @@ async function main() {
 
   const url = `${BASE}/leadership${CODE ? `?code=${encodeURIComponent(CODE)}` : ''}`;
   console.log(`Opening ${url}`);
-  await page.goto(url, { waitUntil: 'networkidle', timeout: 180000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 180000 });
+  // Hydration (and the background roster fetch) must land before clicking
+  // tabs: networkidle is best-effort so a slow proxy cannot hang the run.
+  await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
+  await page.waitForTimeout(1000);
   // The first-visit language dialog must not cover leadership; dismiss it if
   // a stale localStorage flag ever brings it up.
   await page.keyboard.press('Escape').catch(() => {});
@@ -59,7 +63,7 @@ async function main() {
   assert(await page.locator('text=Snapshot health').isVisible(), 'snapshot health block is visible');
   const healthText = await page.locator('text=Snapshot health').locator('xpath=../..').innerText();
   assert(/Last snapshot: \d{4}-\d{2}-\d{2}/.test(healthText), 'last snapshot date is shown', healthText.replace(/\n/g, ' | '));
-  assert(/usable of \d+ in window/.test(healthText), 'usable/total snapshot counts are shown', healthText.replace(/\n/g, ' | '));
+  assert(/\d+ of \d+ snapshots usable in this \d+-interval window/.test(healthText), 'usable/total snapshot counts are shown', healthText.replace(/\n/g, ' | '));
   assert(
     (await page.locator('body').innerText()).indexOf('UNDEFINED') === -1,
     'no UNDEFINED anywhere on the overview',
@@ -128,6 +132,58 @@ async function main() {
   assert(!settled || !stillLoading, 'no endless "Loading saved rosters…" spinner');
   if (rowText.includes('Could not load saved rosters')) {
     assert(await page.locator('button:has-text("Retry")').isVisible(), 'error state offers a Retry button');
+  }
+
+  /* Player detail ---------------------------------------------------------- */
+  console.log('\nPlayer detail');
+  const playerQs = CODE ? `?code=${encodeURIComponent(CODE)}` : '';
+  await page.goto(`${BASE}/leadership/player/25732950${playerQs}`, { waitUntil: 'domcontentloaded', timeout: 180000 });
+  await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
+  await page.waitForTimeout(1000);
+  await page.waitForSelector('text=Leadership profile', { timeout: 60000 });
+  {
+    // innerText applies CSS text-transform, so content is matched lowercased;
+    // the UNDEFINED check stays case-sensitive on the raw text (lowercase
+    // "undefined" legitimately appears in the framework's inline script).
+    const raw = await page.locator('body').innerText();
+    const body = raw.toLowerCase();
+    // The snapshot date in the hero follows the data, so match the shape of a
+    // date instead of pinning a literal one that every scrape outdates.
+    assert(/snapshot \d{4}-\d{2}-\d{2}/.test(body), 'hero shows the snapshot date');
+    assert(body.includes('phoenix of war'), 'hero shows the alliance');
+    assert(!raw.includes('UNDEFINED'), 'no UNDEFINED on the player page');
+    assert(body.includes('reporting window'), 'overview tab renders by default');
+    assert(body.includes('quick read'), 'quick-read card present');
+    assert(body.includes('baseline'), 'baseline is named');
+    assert(body.includes('current merits by troop'), 'per-troop merits shown');
+  }
+
+  // Growth: the leadership-exclusive charts.
+  await page.getByRole('button', { name: 'Growth', exact: true }).click();
+  await page.waitForSelector('text=Power & rank', { timeout: 30000 });
+  {
+    const charts = await page.locator('.recharts-surface').count();
+    assert(charts >= 6, `growth tab renders the chart set (saw ${charts} chart surfaces)`);
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    assert(body.includes('daily kill gains'), 'daily kill-gain chart present');
+    assert(body.includes('units killed'), 'counter charts present');
+    assert(body.includes('resources gathered') || body.includes('activity coverage'), 'coverage/gathered cards present');
+  }
+
+  // Profile: the complete data the public page does not show in one place.
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
+  await page.waitForSelector('text=Previous names', { timeout: 30000 });
+  {
+    const raw = await page.locator('body').innerText();
+    const body = raw.toLowerCase();
+    assert(body.includes('previous servers'), 'previous servers listed');
+    assert(body.includes('gallery'), 'gallery (album) card present');
+    assert(body.includes('achievements ('), 'achievements listed');
+    assert(body.includes('snapshot history ('), 'snapshot history listed');
+    assert(body.includes('source metrics ('), 'source metrics listed');
+    const albumImages = await page.locator('a img[src*="image-proxy"]').count();
+    assert(albumImages >= 1, `album images render (saw ${albumImages})`);
+    assert(!raw.includes('UNDEFINED'), 'no UNDEFINED on the profile tab');
   }
 
   /* console --------------------------------------------------------------------- */

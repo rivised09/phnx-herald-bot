@@ -1,6 +1,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { wrapCommand, displayAvailable, xvfbRunPath, ALREADY_WRAPPED } = require('../utils/xvfb');
 
 /**
  * Scrape jobs, driven from the web dashboard.
@@ -170,10 +171,12 @@ function getScrapeState({ after = 0, limit = 500 } = {}) {
 /**
  * Whether the host has a display a browser window can open on.
  *
- * Informational only: the DragonStats gate mints headless, so scrapes do not
- * need this. Windows and macOS are desktops; on Linux DISPLAY or
- * WAYLAND_DISPLAY is trusted (a container may run Xvfb deliberately), with
- * the X socket checked so a stale variable does not point at a dead display.
+ * Informational only: the gate tries headless first, and when that is refused
+ * the runner wraps the scrape child in xvfb-run, so a display-less host still
+ * works as long as xvfb-run is installed. Windows and macOS are desktops; on
+ * Linux DISPLAY or WAYLAND_DISPLAY is trusted (a container may run Xvfb
+ * deliberately), with the X socket checked so a stale variable does not point
+ * at a dead display.
  */
 function canOpenWindow() {
   if (process.platform === 'win32' || process.platform === 'darwin') return true;
@@ -232,6 +235,8 @@ async function getScrapeOptions() {
     dragon: { gate: gateStatus() },
     callofstats: { accounts },
     canOpenWindow: canOpenWindow(),
+    display: displayAvailable(),
+    xvfb: { available: Boolean(xvfbRunPath()) },
     platform: process.platform,
     running: Boolean(job?.running),
   };
@@ -295,13 +300,34 @@ function runStep(key, args, phase) {
       exitCode: null,
     };
     job = { ...job, phase, steps: [...job.steps, step] };
-    addLog('meta', `[scrape] $ node ${path.relative(ROOT, script)} ${args.join(' ')}`);
+
+    // The DragonStats gate's windowed fallback needs an X display. A headless
+    // server has none, so the child is started under xvfb-run when possible
+    // instead of failing with "Missing X server or $DISPLAY".
+    const wrapped = wrapCommand(process.execPath, [script, ...args]);
+    const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
+    if (wrapped.wrapped) {
+      delete env.DISPLAY;
+      env[ALREADY_WRAPPED] = '1';
+      addLog('meta', '[scrape] No display found; running under xvfb-run (virtual X server).');
+    } else if (wrapped.missing) {
+      addLog(
+        'stderr',
+        '[scrape] No display and xvfb-run is missing; a headed browser cannot start. ' +
+          'Install it with: sudo apt-get install -y xvfb xauth',
+      );
+    }
+
+    addLog(
+      'meta',
+      `[scrape] $ ${wrapped.wrapped ? 'xvfb-run -a ' : ''}node ${path.relative(ROOT, script)} ${args.join(' ')}`,
+    );
 
     let proc;
     try {
-      proc = spawn(process.execPath, [script, ...args], {
+      proc = spawn(wrapped.command, wrapped.args, {
         cwd: ROOT,
-        env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+        env,
         windowsHide: true,
         detached: process.platform !== 'win32',
       });

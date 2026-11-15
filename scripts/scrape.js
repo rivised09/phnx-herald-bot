@@ -25,6 +25,12 @@ const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
+// A hand-run scrape on a headless host needs the same virtual display the
+// dashboard runner supplies: DragonStats' headless gate can be refused, and the
+// windowed fallback cannot start without X. No-op when a display exists.
+const { reexecUnderXvfb } = require('../src/utils/xvfb');
+reexecUnderXvfb();
+
 const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
 const { allianceResolver } = require('../src/dragon/resolve');
