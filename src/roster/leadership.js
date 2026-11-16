@@ -338,12 +338,27 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
     point.highlyActive = 0;
     point.active = 0;
     point.lowActivity = 0;
+    // The same split per alliance, so filtering the trend by alliance keeps the
+    // three band lines instead of dropping to a single total for the selection.
+    const bandsByAlliance = {};
     for (const id of ids) {
       const band = bandOf(bandByLord.get(id) || 0);
-      if (band === 'Highly Active') point.highlyActive += 1;
-      else if (band === 'Active') point.active += 1;
-      else point.lowActivity += 1;
+      const alliance = allianceByLord.get(id) || 'Not In An Alliance';
+      const bucket =
+        bandsByAlliance[alliance] ||
+        (bandsByAlliance[alliance] = { highlyActive: 0, active: 0, lowActivity: 0 });
+      if (band === 'Highly Active') {
+        point.highlyActive += 1;
+        bucket.highlyActive += 1;
+      } else if (band === 'Active') {
+        point.active += 1;
+        bucket.active += 1;
+      } else {
+        point.lowActivity += 1;
+        bucket.lowActivity += 1;
+      }
     }
+    point.bandsByAlliance = bandsByAlliance;
   }
 
   const latestMeta = meta.find((entry) => entry.date === latestDate);

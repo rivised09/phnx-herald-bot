@@ -378,6 +378,17 @@ async function scrapeServer(server, args, scanIndex, store) {
   // publish until its max-age ran out.
   bytes += await store.put('index.json', index, { cacheControl: 'no-store' });
 
+  // The Overview's weekday ranking, derived from the summaries already in the
+  // bucket so it can never disagree with the windows they describe. A failure
+  // here costs one card, never the publish.
+  try {
+    const { writeDayRanking } = require('../src/roster/day-ranking');
+    const ranking = await writeDayRanking(store);
+    console.log(`[SCRAPE] wrote leadership/days.json · ${ranking.dayCount} days ranked`);
+  } catch (err) {
+    console.warn(`[SCRAPE] day ranking not written: ${err.message}`);
+  }
+
   console.log(
     `[SCRAPE] #${server} ${date}: published ${players.length + alliances.length + 2} files, ` +
       `${describe(bytes)}, ${((Date.now() - started) / 1000).toFixed(1)}s ` +

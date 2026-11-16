@@ -23,6 +23,7 @@
     "scrape": "node scripts/scrape.js",
     "repair": "node scripts/repair-dates.js",
     "summarize": "node scripts/summarize-dates.js",
+    "days": "node scripts/build-day-ranking.js",
     "callofstats:scrape": "node scripts/callofstats-scrape.js",
     "callofstats:scrape:player": "node scripts/callofstats-scrape.js",
     "callofstats:scrape:date": "node scripts/callofstats-scrape.js --by-date --date latest",
