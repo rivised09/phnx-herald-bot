@@ -306,7 +306,11 @@ async function scrapeServer(server, args, scanIndex, store) {
 
   let bytes = 0;
   const snapshotBytes = await store.put(snapshotKey, snapshot, {
-    cacheControl: 'public, max-age=3600',
+    // Today's objects are rewritten by the next scrape, so the edge must not
+    // hold them for an hour; the web also versions its reads by the publish
+    // stamp in index.json (see phoenix-herald-web files.js), which is what
+    // makes a finished scrape visible on the next page load.
+    cacheControl: 'public, max-age=60',
   });
   bytes += snapshotBytes;
   console.log(`[SCRAPE] wrote ${snapshotKey} · ${describe(snapshotBytes)}`);
@@ -316,7 +320,7 @@ async function scrapeServer(server, args, scanIndex, store) {
   for (const item of players) {
     playerIndex += 1;
     const itemStarted = Date.now();
-    const size = await store.put(item.key, item.value, { cacheControl: 'public, max-age=3600' });
+    const size = await store.put(item.key, item.value, { cacheControl: 'public, max-age=60' });
     bytes += size;
     playerProgress.item({
       index: playerIndex,
@@ -361,7 +365,7 @@ async function scrapeServer(server, args, scanIndex, store) {
   const summary = await buildLeadershipSummary(store, date, { files: existingById });
   if (summary) {
     const size = await store.put(`leadership/${date}.json`, summary, {
-      cacheControl: 'public, max-age=3600',
+      cacheControl: 'no-store',
     });
     bytes += size;
     console.log(
@@ -369,7 +373,10 @@ async function scrapeServer(server, args, scanIndex, store) {
     );
   }
 
-  bytes += await store.put('index.json', index, { cacheControl: 'public, max-age=60' });
+  // The index is the publish stamp every other read is versioned by, so it is
+  // never cached: a stale index would pin the whole site to the previous
+  // publish until its max-age ran out.
+  bytes += await store.put('index.json', index, { cacheControl: 'no-store' });
 
   console.log(
     `[SCRAPE] #${server} ${date}: published ${players.length + alliances.length + 2} files, ` +

@@ -113,7 +113,9 @@ async function main() {
         continue;
       }
       const size = await store.put(`leadership/${date}.json`, summary, {
-        cacheControl: 'public, max-age=3600',
+        // Republishing a summary must be visible at once: this command does not
+        // rewrite index.json, so its publish stamp cannot version the summary.
+        cacheControl: 'no-store',
       });
       ok += 1;
       console.log(
