@@ -118,6 +118,11 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
     if (loaded[i]) playerFiles.set(id, loaded[i]);
   });
 
+  // Per-interval progression, keyed by date: the lord ids that showed
+  // measurable progress between that date and the previous usable snapshot.
+  // Filled while the timeline is built, then split into activity bands below.
+  const progressedByDate = new Map();
+
   const players = [];
   let playersWithoutFile = 0;
   for (const [playerId, snapPlayer] of latestSnapPlayers) {
@@ -287,10 +292,9 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
       return { date: entry.date, activePlayers: null, gap: true, reason: 'after-gap' };
     }
     let activePlayers = 0;
-    // Per-alliance counts for the dashboard's alliance filter. Every counted
-    // lord is attributed to the alliance the players table shows for them (the
-    // window-end entry), so summing selected alliances always equals the total.
+    // Per-alliance counts for the dashboard's alliance filter.
     const byAlliance = {};
+    const progressedIds = new Set();
     for (const [id, file] of playerFiles) {
       const currentM = file.metrics?.[entry.date] || {};
       const previousM = file.metrics?.[previous.date] || {};
@@ -310,12 +314,37 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
           currentPower > previousPower)
       ) {
         activePlayers += 1;
+        progressedIds.add(id);
         const alliance = allianceByLord.get(id) || 'Not In An Alliance';
         byAlliance[alliance] = (byAlliance[alliance] || 0) + 1;
       }
     }
+    progressedByDate.set(entry.date, progressedIds);
     return { date: entry.date, activePlayers, gap: false, reason: null, byAlliance };
   });
+
+  // A lord's band is how many intervals they progressed in - the same count
+  // behind `players[].activity` - so the three band counts add up to the
+  // interval total, including lords no longer in the newest snapshot.
+  const bandByLord = new Map();
+  for (const ids of progressedByDate.values()) {
+    for (const id of ids) bandByLord.set(id, (bandByLord.get(id) || 0) + 1);
+  }
+  const bandOf = (intervals) =>
+    intervals >= 6 ? 'Highly Active' : intervals >= 4 ? 'Active' : 'Low Activity';
+  for (const point of timeline) {
+    const ids = progressedByDate.get(point.date);
+    if (!ids) continue;
+    point.highlyActive = 0;
+    point.active = 0;
+    point.lowActivity = 0;
+    for (const id of ids) {
+      const band = bandOf(bandByLord.get(id) || 0);
+      if (band === 'Highly Active') point.highlyActive += 1;
+      else if (band === 'Active') point.active += 1;
+      else point.lowActivity += 1;
+    }
+  }
 
   const latestMeta = meta.find((entry) => entry.date === latestDate);
 

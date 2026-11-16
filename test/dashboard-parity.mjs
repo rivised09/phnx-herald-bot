@@ -261,6 +261,20 @@ async function main() {
         'Not In An Alliance': 1,
       });
     });
+    check('per-band counts add up to the interval total', () => {
+      for (const entry of slow.activityTimeline) {
+        if (entry.activePlayers === null) continue;
+        assert.strictEqual(
+          entry.highlyActive + entry.active + entry.lowActivity,
+          entry.activePlayers,
+        );
+      }
+      // One usable interval in this window, so both lords are Low Activity.
+      assert.deepStrictEqual(
+        [slow.activityTimeline.at(-1).highlyActive, slow.activityTimeline.at(-1).active, slow.activityTimeline.at(-1).lowActivity],
+        [0, 0, 2],
+      );
+    });
     check('a known-active player has a non-zero kill delta', () => {
       const alpha = slow.players.find((p) => p.id === '1');
       // The window's usable days are 11-04 -> 11-05, so the delta spans one day.
