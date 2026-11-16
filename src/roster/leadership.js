@@ -259,6 +259,22 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
     }
   }
 
+  // id -> the alliance the players table shows for that lord (window-end
+  // entry, snapshot as fallback). Used to bucket the activity timeline so the
+  // dashboard can filter the trend by alliance; the same rule as
+  // `players[].alliance` keeps the buckets and the table in agreement.
+  const allianceByLord = new Map();
+  for (const [id, file] of playerFiles) {
+    const fileAlliance = file.byDate?.[latestDate]?.alliance;
+    const snapEntry = latestSnapPlayers.get(id);
+    allianceByLord.set(
+      id,
+      (typeof fileAlliance === 'string' && fileAlliance.trim()) ||
+        snapEntry?.alliance ||
+        'Not In An Alliance',
+    );
+  }
+
   const timeline = meta.map((entry, index) => {
     if (!entry.valid) {
       return { date: entry.date, activePlayers: null, gap: true, reason: entry.reason };
@@ -271,7 +287,11 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
       return { date: entry.date, activePlayers: null, gap: true, reason: 'after-gap' };
     }
     let activePlayers = 0;
-    for (const [, file] of playerFiles) {
+    // Per-alliance counts for the dashboard's alliance filter. Every counted
+    // lord is attributed to the alliance the players table shows for them (the
+    // window-end entry), so summing selected alliances always equals the total.
+    const byAlliance = {};
+    for (const [id, file] of playerFiles) {
       const currentM = file.metrics?.[entry.date] || {};
       const previousM = file.metrics?.[previous.date] || {};
       const progressed = ['Units Killed', 'Merits', 'Units Healed'].some((label) => {
@@ -290,9 +310,11 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
           currentPower > previousPower)
       ) {
         activePlayers += 1;
+        const alliance = allianceByLord.get(id) || 'Not In An Alliance';
+        byAlliance[alliance] = (byAlliance[alliance] || 0) + 1;
       }
     }
-    return { date: entry.date, activePlayers, gap: false, reason: null };
+    return { date: entry.date, activePlayers, gap: false, reason: null, byAlliance };
   });
 
   const latestMeta = meta.find((entry) => entry.date === latestDate);

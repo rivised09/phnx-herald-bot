@@ -253,6 +253,14 @@ async function main() {
         ],
       );
     });
+    check('the timeline buckets activity by the players-table alliance', () => {
+      // Alpha is in [PHW-] TEST; Ghost left the roster but its history still
+      // counts, attributed to the alliance it had (none).
+      assert.deepStrictEqual(slow.activityTimeline.at(-1).byAlliance, {
+        '[PHW-] TEST': 1,
+        'Not In An Alliance': 1,
+      });
+    });
     check('a known-active player has a non-zero kill delta', () => {
       const alpha = slow.players.find((p) => p.id === '1');
       // The window's usable days are 11-04 -> 11-05, so the delta spans one day.
