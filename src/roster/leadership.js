@@ -177,6 +177,25 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
       ]),
     );
 
+    // KvK merits reset when a new round starts, so `last - first` over the
+    // window is negative for exactly the lords who are earning the most right
+    // now - which made the overview say "No merit growth this window" while
+    // two lords held 91K and 74K. A drop in the series means the counter
+    // restarted, and then the current value *is* the growth since the reset.
+    const meritSeries = metricObservations
+      .map((item) => item.values.merits)
+      .filter((value) => value !== null && value !== undefined);
+    if (meritSeries.length < 2) changes.merits = null;
+    else {
+      let resetSeen = false;
+      let gained = 0;
+      for (let i = 1; i < meritSeries.length; i += 1) {
+        if (meritSeries[i] >= meritSeries[i - 1]) gained += meritSeries[i] - meritSeries[i - 1];
+        else resetSeen = true;
+      }
+      changes.merits = resetSeen ? meritSeries[meritSeries.length - 1] : gained;
+    }
+
     const activeObservations = observations.slice(1).filter((observation, index) => {
       const before = observations[index].values;
       return (
@@ -225,12 +244,26 @@ async function buildLeadershipSummary(store, endDate, { files = null, concurrenc
     };
 
     const fileAlliance = file.byDate?.[latestDate]?.alliance;
+    // Current KvK merits and the merits-to-power ratio the lists show: the
+    // same figure and rounding as the web reader (`ratioFields` in
+    // phoenix-herald-web/src/lib/roster/files.js). KvK Merits leads; lifetime
+    // `Total Merits` is not used, since it never resets.
+    const meritValue = Number(
+      lastMetrics['KvK Merits'] ?? lastMetrics.Merits ?? lastMetrics['PvP Points'],
+    );
+    const meritsTotal = Number.isFinite(meritValue) ? meritValue : null;
+    const mpRatio =
+      meritsTotal !== null && (snapPlayer.power ?? 0) > 0
+        ? Math.round((meritsTotal / snapPlayer.power) * 10000) / 100
+        : null;
     players.push({
       id: playerId,
       name: snapPlayer.name,
       powerFull: snapPlayer.power ?? null,
       powerValue: snapPlayer.power ?? 0,
       merits: snapPlayer.merits || null,
+      meritsTotal,
+      mpRatio,
       activity,
       status,
       powerChange,

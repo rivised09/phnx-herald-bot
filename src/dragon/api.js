@@ -203,6 +203,101 @@ async function findServer(serverName) {
   return (all || []).find((entry) => String(entry.name).replace(/^#/, '') === wanted) || null;
 }
 
+/**
+ * The KVK season rows behind https://dragonstats.com/kvk/list.
+ *
+ * The division/season a kingdom plays in is not in the scan JSON: it lives on
+ * the dashboard (`KVK / SOS / SoS1-3126 / <start> - <end>`) and, with every
+ * season's kingdom list, on the KVK list page. This reads that table and
+ * returns `{ label, stage, servers, status, pass, start, end }` per season,
+ * where start/end are UTC dates (`2026-11-17`) parsed from the page's local
+ * times - the same span DragonStats states for the season.
+ *
+ * Scraping costs one page load, so callers cache the result for their run.
+ */
+let seasonCache = { at: 0, seasons: null };
+const SEASON_TTL_MS = 10 * 60 * 1000;
+
+async function kvkSeasons({ force = false } = {}) {
+  if (!force && seasonCache.seasons && Date.now() - seasonCache.at < SEASON_TTL_MS) {
+    return seasonCache.seasons;
+  }
+  const { withPage, BASE } = require('./session');
+  const rows = await withPage(async (page) => {
+    await page.goto(`${BASE}/kvk/list`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForSelector('table tr', { timeout: 30000 });
+    await page.waitForTimeout(4000);
+    return page.evaluate(() =>
+      [...document.querySelectorAll('table tr')].map((tr) =>
+        [...tr.querySelectorAll('td')].map((td) => td.innerText.trim()),
+      ),
+    );
+  });
+
+  const seasons = rows.map(parseSeasonRow).filter(Boolean);
+  seasonCache = { at: Date.now(), seasons };
+  return seasons;
+}
+
+/** One `/kvk/list` row -> a season, or null for the header and stray rows. */
+function parseSeasonRow(cells) {
+  if (!Array.isArray(cells) || !cells.length) return null;
+  const labelCell = cells.find((cell) => /^(SoS|S)\d+-\d+/.test(cell));
+  if (!labelCell) return null;
+
+  const label = labelCell.split('\n')[0].trim();
+  const stage = (cells.find((cell) => /^(SoS|S)\d+(\n|$)/.test(cell)) || '').split('\n')[0].trim() || null;
+  const groupsCell = cells.find((cell) => /^\d+:\s*[\d\s,]+$/.test(cell));
+  const serverNumbers = groupsCell
+    ? groupsCell
+        .split(':')[1]
+        .split(',')
+        .map((value) => Number(value.trim()))
+        .filter((value) => Number.isFinite(value))
+    : [];
+  const dates = cells
+    .filter((cell) => /, \d{4} at \d{1,2}:\d{2} [AP]M$/.test(cell))
+    .map((cell) => {
+      const parsed = new Date(cell.replace(' at ', ' '));
+      return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+    })
+    .filter(Boolean);
+  const status = (cells.find((cell) => /^(ACTIVE|FINISHED|UPCOMING)$/i.test(cell)) || null)?.toUpperCase() || null;
+  const passCell = cells.find((cell) => /^\d+$/.test(cell));
+
+  if (!dates.length) return null;
+  return {
+    label,
+    stage,
+    servers: serverNumbers,
+    status,
+    pass: passCell ? Number(passCell) : null,
+    start: dates[0],
+    end: dates[1] || null,
+  };
+}
+
+/**
+ * The season a kingdom played on `date` (YYYY-MM-DD), or null when the KVK
+ * list does not place that server in any season covering the day.
+ *
+ * `seasons` lets a caller that already fetched the list reuse it.
+ */
+async function kvkSeasonFor(serverName, date, { seasons = null } = {}) {
+  const number = Number(String(serverName).replace(/^#/, '').trim());
+  if (!Number.isFinite(number) || !date) return null;
+  const all = seasons || (await kvkSeasons());
+  return (
+    all.find(
+      (season) =>
+        Array.isArray(season.servers) &&
+        season.servers.includes(number) &&
+        season.start <= date &&
+        (!season.end || date <= season.end),
+    ) || null
+  );
+}
+
 module.exports = {
   DEPLOYMENT,
   GATE_FILE,
@@ -217,4 +312,7 @@ module.exports = {
   scanOnDate,
   fetchScan,
   findServer,
+  kvkSeasons,
+  kvkSeasonFor,
+  parseSeasonRow,
 };

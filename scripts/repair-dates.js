@@ -28,11 +28,9 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
-const { allianceResolver } = require('../src/dragon/resolve');
 const { buildLeadershipSummary } = require('../src/roster/leadership');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
-const { carryForward } = require('../src/roster/carry');
 
 const PLAYERS = 'players';
 const ALLIANCES = 'alliances';
@@ -230,8 +228,8 @@ async function repairDate(server, date, args, store, scansByDate) {
   const index = await store.get('index.json');
   const latestSnapshot = index?.latest ? await store.get(`${SNAPSHOTS}/${index.latest}.json`) : null;
 
-  // Load every player the day's scan lists so the alliance resolver can walk
-  // their history (and so the merge does not fetch them twice).
+  // Load every player the day's scan lists so the merge does not fetch them
+  // twice.
   const scanIds = [
     ...new Set(scan.map((record) => String(record.id || '').trim()).filter(Boolean)),
   ];
@@ -250,7 +248,6 @@ async function repairDate(server, date, args, store, scansByDate) {
     },
     crawledAt: scanInfo.createdAt,
     serverUrl: `https://dragonstats.com/dashboard/${server}`,
-    resolveAlliance: allianceResolver(existingById, date),
   });
 
   const owned = scanOwnedLabels(built, date);
@@ -284,8 +281,8 @@ async function repairDate(server, date, args, store, scansByDate) {
   const merges = await pool([...existingById.entries()], args.concurrency, async ([id, existing]) => {
     const incoming = built.players.get(id);
     if (!incoming) return null;
-    const value = mergeFile('player', existing, carryForward(existing, incoming, date));
-    return { key: `${PLAYERS}/${id}.json`, value, mode: 'merge' };
+    const value = replaceDay(existing, incoming, date);
+    return { key: `${PLAYERS}/${id}.json`, value, mode: 'replace' };
   });
 
   const strips = extraFiles.flatMap((item) => {
@@ -314,7 +311,7 @@ async function repairDate(server, date, args, store, scansByDate) {
     if (!existingById.has(id)) {
       news.push({
         key: `${PLAYERS}/${id}.json`,
-        value: mergeFile('player', null, carryForward(null, incoming, date)),
+        value: mergeFile('player', null, incoming),
         mode: 'new',
       });
     }
@@ -407,6 +404,32 @@ async function repairDate(server, date, args, store, scansByDate) {
 }
 
 /** One alliance's entry for one date, in the shape archive.js writes. */
+/**
+ * Rebuilds one player's day from that day's own scan.
+ *
+ * A DragonStats day used to be merged additively and seeded with the newest
+ * callofstats reading (carryForward), so the player page showed months-old
+ * ToC/RoW/season figures under "Source figures · <today>". Replacing the entry
+ * is the point of a repair: the day says exactly what its scan said, and the
+ * callofstats dates keep their own values untouched. Enrichment that belongs to
+ * the date (albums, achievements, avatar) is the one thing kept, because a scan
+ * never publishes it.
+ */
+function replaceDay(existing, incoming, date) {
+  if (!existing) return incoming;
+  const previous = existing.byDate?.[date] || {};
+  const entry = { ...incoming.byDate[date] };
+  for (const field of ['albums', 'achievements', 'avatar']) {
+    if (previous[field] !== undefined && previous[field] !== null) entry[field] = previous[field];
+  }
+  return {
+    ...existing,
+    dates: [...new Set([...(existing.dates || []), date])].sort().reverse(),
+    byDate: { ...(existing.byDate || {}), [date]: entry },
+    metrics: { ...(existing.metrics || {}), [date]: incoming.metrics[date] },
+  };
+}
+
 function allianceEntry(alliance, date, players) {
   const members = players
     .filter((player) => player.allianceId === alliance.name)
@@ -444,17 +467,14 @@ async function main() {
   // One token use up front: the scan list needs the gate, the scan files and
   // the bucket do not.
   const scansByDate = new Map();
-  await api.withClient(async (client, gate) => {
-    const records = (await api.scans(client, gate, server)).filter((r) => r.externalUrl);
-    for (const record of records) {
-      const createdAt = new Date(record._creationTime || 0);
-      const day = createdAt.toISOString().slice(0, 10);
-      const current = scansByDate.get(day);
-      if (!current || createdAt > current.createdAt) {
-        scansByDate.set(day, { url: record.externalUrl, createdAt });
-      }
+  for (const record of await api.scanRecords(server)) {
+    const createdAt = new Date(record._creationTime || 0);
+    const day = createdAt.toISOString().slice(0, 10);
+    const current = scansByDate.get(day);
+    if (!current || createdAt > current.createdAt) {
+      scansByDate.set(day, { url: record.externalUrl, createdAt });
     }
-  });
+  }
 
   let dates;
   if (args.dates) {

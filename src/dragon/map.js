@@ -127,7 +127,10 @@ const FIELD_MAP = [
   { from: 'GatherRes3', label: 'Ore Gathered', section: 'Gathered Resources', kind: NUMBER },
   { from: 'GatherRes4', label: 'Mana Gathered', section: 'Gathered Resources', kind: NUMBER },
 
-  { from: 'CostGem', label: 'Gems Spent', section: 'Historic Resources Spent', kind: NUMBER },
+  // `gemsSpent` is the gems-spent total DragonStats' own player page shows;
+  // `CostGem` is published as "0" for every player in #973, and a literal zero
+  // is not the same as "no value", so it can only be a fallback.
+  { from: 'gemsSpent', label: 'Gems Spent', section: 'Historic Resources Spent', kind: NUMBER, fallback: ['CostGem'] },
   { from: 'CostRes1', label: 'Gold Spent', section: 'Historic Resources Spent', kind: NUMBER },
   { from: 'CostRes2', label: 'Wood Spent', section: 'Historic Resources Spent', kind: NUMBER },
   { from: 'CostRes3', label: 'Ore Spent', section: 'Historic Resources Spent', kind: NUMBER },
@@ -434,12 +437,13 @@ function sectionsFor(player) {
  * scraped from DragonStats links to the same alliance page as the days scraped
  * from callofstats instead of creating a second one.
  *
- * `resolveAlliance(id)` is the answer to DragonStats leaving `alliance` empty
- * for players it has no alliance record for (60+ lords on #973, including the
- * strongest one). An empty field means "unknown", not "left the alliance", so
- * the caller can supply the last alliance we recorded for that player on an
- * earlier date and the day is filed under it instead of under the synthetic
- * "Not In An Alliance" bucket.
+ * An empty `alliance` means the player is in no alliance on that day. That is
+ * not a guess: the same records carry no alliance grade, title or help count,
+ * while every member does, so DragonStats is stating "unallied", not failing
+ * to fill the field. Earlier code carried the player's last recorded alliance
+ * into these days instead, which kept lords who had left (or quit the game)
+ * filed under a dead alliance and left the "Not In An Alliance" bucket empty.
+ * A day therefore shows the alliance stated for that day, nothing inherited.
  */
 function fromScan(scan, {
   server,
@@ -447,7 +451,6 @@ function fromScan(scan, {
   existingAlliances = {},
   crawledAt = null,
   serverUrl = null,
-  resolveAlliance = null,
 } = {}) {
   if (!Array.isArray(scan) || !scan.length) throw new Error('The scan is empty.');
 
@@ -457,9 +460,7 @@ function fromScan(scan, {
   /** The alliance this player belongs to on this day. */
   const allianceOf = (id, raw) => {
     const stated = String(raw || '').trim();
-    if (stated) return stated;
-    const carried = resolveAlliance ? String(resolveAlliance(id) || '').trim() : '';
-    return carried || UNAFFILIATED_NAME;
+    return stated || UNAFFILIATED_NAME;
   };
 
   for (const record of scan) {

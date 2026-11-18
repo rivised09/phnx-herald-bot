@@ -33,7 +33,6 @@ reexecUnderXvfb();
 
 const api = require('../src/dragon/api');
 const map = require('../src/dragon/map');
-const { allianceResolver } = require('../src/dragon/resolve');
 const { buildLeadershipSummary } = require('../src/roster/leadership');
 const r2 = require('../src/roster/r2');
 const { mergeFile } = require('../src/roster/merge');
@@ -244,10 +243,8 @@ async function scrapeServer(server, args, scanIndex, store) {
     ...allianceIdsFrom(existingLatest),
   };
 
-  // DragonStats reports no alliance for some players (empty string, no title
-  // either). Before a day is built, load those players' own histories so the
-  // resolver can file them under the last alliance we recorded instead of
-  // marking them "Not In An Alliance".
+  // Load the histories of the players this scan lists, so the merge below does
+  // not fetch them a second time.
   const scanIds = [
     ...new Set(
       collected.scan.map((record) => String(record.id || '').trim()).filter(Boolean),
@@ -265,7 +262,6 @@ async function scrapeServer(server, args, scanIndex, store) {
     existingAlliances,
     crawledAt: collected.createdAt,
     serverUrl: collected.serverUrl,
-    resolveAlliance: allianceResolver(existingById, date),
   });
 
   console.log(
@@ -282,7 +278,10 @@ async function scrapeServer(server, args, scanIndex, store) {
   const players = await pool([...built.players.values()], args.concurrency, async (player) => {
     const key = `${PLAYERS}/${player.id}.json`;
     const existing = existingById.get(player.id) ?? (await store.get(key));
-    const value = mergeFile('player', existing, carryForward(existing, player, date));
+    // No carry-forward onto a DragonStats day: what that scan did not publish
+    // stays unpublished for the date instead of showing the last callofstats
+    // reading as if it were today's. The older dates keep their own values.
+    const value = mergeFile('player', existing, player);
     // Keep the in-memory copy truthful: the leadership summary builder reads
     // from it after the writes instead of re-fetching every file.
     existingById.set(player.id, value);
@@ -350,6 +349,17 @@ async function scrapeServer(server, args, scanIndex, store) {
     });
   }
   allianceProgress.bar();
+
+  // The KVK season table the profile's Division row reads (label, kingdoms,
+  // start/end). Best effort: a browser hiccup here must not fail a scrape
+  // whose data is already written - the previous seasons.json stays in place.
+  try {
+    const { publishSeasons } = require('../src/roster/seasons');
+    const payload = await publishSeasons(store, { server });
+    console.log(`[SCRAPE] wrote seasons.json · ${payload.seasons.length} seasons`);
+  } catch (error) {
+    console.warn(`[SCRAPE] seasons.json not refreshed: ${error.message}`);
+  }
 
   const index = await buildIndex(store, existingIndex, {
     server,
